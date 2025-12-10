@@ -1,17 +1,17 @@
 # 🗺️ OmniMap Agent
 
-A production-ready Telegram bot built with **Next.js 14**, **grammY**, and **Supabase**, designed to run seamlessly on **Vercel** with webhook support and an optional background worker.
+A production-ready Telegram bot built with **Python (FastAPI)**, **python-telegram-bot**, and **Supabase**, designed to run on **Google Cloud Run** or any container platform with webhook support and a unified background worker.
 
 Objective: Extract, analyze, and enrich map data from user-provided content. Start with Instagram Reels → likely places with Google Maps links; expand to more sources and propose map update suggestions.
 
 ## ✨ Features
 
-- 🚀 **Vercel-ready**: Deploys as serverless functions with webhook support
-- 🔄 **Dual mode**: Local polling for development, webhooks for production
+- 🚀 **Cloud-ready**: Deploy to Google Cloud Run, Docker, or any container platform
+- 🐍 **Pure Python**: FastAPI + python-telegram-bot for webhook handling
+- 🔄 **Unified worker**: Single background worker handles all job types
 - 🗄️ **Supabase integration**: Persistent storage and background job processing
-- 🏗️ **TypeScript**: Fully typed with strict mode enabled
 - 🔒 **Secure**: Webhook secret validation and environment variable validation
-- 🎯 **Modern stack**: Next.js 14 App Router, grammY, Zod validation
+- 🎯 **Modern stack**: FastAPI, python-telegram-bot, httpx
 - 🧭 **Map extraction (WIP)**: From content → candidate places with links
 
 ## 🚀 Quick Start
@@ -21,32 +21,36 @@ Objective: Extract, analyze, and enrich map data from user-provided content. Sta
 ```bash
 # Clone the repository
 git clone <your-repo-url>
-cd pr-omnimapAgent
+cd pr-omnimapAgent/python/agent
+
+# Create virtual environment
+python -m venv .venv
+source .venv/bin/activate  # On Windows: .venv\Scripts\activate
 
 # Install dependencies
-pnpm install
+pip install -r requirements.txt
 ```
 
 ### 2. Environment Setup
 
 ```bash
-# Copy environment template
-cp .env.example .env.local
-
-# Edit your environment variables
-nano .env.local
+# Create .env file in python/agent/
+cd python/agent
+nano .env
 ```
 
 Required environment variables:
 
 - `BOT_TOKEN`: Get from [@BotFather](https://t.me/BotFather)
 - `WEBHOOK_SECRET`: Generate a long random string
-- `PUBLIC_URL`: Your deployed Vercel URL (only needed for webhooks)
+- `PUBLIC_URL`: Your deployed service URL (e.g., https://your-service.run.app)
 - `SUPABASE_URL`: Your Supabase project URL
-- `SUPABASE_ANON_KEY`: Your Supabase anon key
-- `SUPABASE_SERVICE_ROLE`: Your Supabase service role key (required in production for server-side storage)
+- `SUPABASE_SERVICE_ROLE`: Your Supabase service role key (required)
 
-Optional (future extraction enrichments): None required today. We will document additional keys when features land.
+Optional:
+
+- `PYTHON_WORKER_POLL_INTERVAL`: Job polling interval in seconds (default: 5)
+- `PYTHON_WORKER_ENABLED`: Enable/disable background worker (default: true)
 
 ### 3. Database Setup (Prisma)
 
@@ -66,75 +70,76 @@ pnpm prisma:generate
 pnpm prisma:deploy   # applies the checked-in migrations
 ```
 
-That’s it. The checked-in Prisma schema defines the `jobs` table used by the bot and worker.
+That's it. The checked-in Prisma schema defines the `jobs` table used by the bot and worker.
 
-### 4. Development Modes
+### 4. Development Mode
 
-#### Local Polling Mode (Recommended for development)
-
-```bash
-# Start the bot in polling mode
-pnpm bot:dev
-```
-
-#### Local Webhook Mode (Advanced)
+#### Local Webhook Mode with Tunnel
 
 ```bash
-# Terminal 1: Start Next.js dev server
-pnpm dev
+# Terminal 1: Start FastAPI server
+cd python/agent
+uvicorn main:app --reload --host 0.0.0.0 --port 8080
 
 # Terminal 2: Expose localhost with ngrok
-npx ngrok http 3000
+ngrok http 8080
 
 # Terminal 3: Set webhook with ngrok URL
-PUBLIC_URL=https://your-ngrok-url.ngrok.io pnpm bot:set-webhook
+cd python/agent
+PUBLIC_URL=https://your-ngrok-url.ngrok.io python set_webhook.py
 ```
 
 ### 5. Production Deployment
 
-#### Deploy to Vercel
+#### Deploy to Google Cloud Run
 
 ```bash
-# Deploy to Vercel
-vercel --prod
-
-# Set environment variables in Vercel dashboard
-# Then register webhook
-pnpm bot:set-webhook
-```
-
-### 6. Background Worker (Optional)
-
-For processing background jobs:
-
-```bash
-# Start the worker locally
-pnpm worker:dev
-```
-
-In production, you can run the worker as a separate service or scheduled function.
-
-### 6.1 Python Agent (Prototype)
-
-The Python FastAPI worker that processes `python_hello` jobs lives in `python/agent`.
-
-```bash
+# Deploy the Python agent
 cd python/agent
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-uvicorn main:app --reload
+gcloud run deploy omnimap-python-agent \
+  --source . \
+  --region us-central1 \
+  --allow-unauthenticated \
+  --set-env-vars BOT_TOKEN=xxx,WEBHOOK_SECRET=yyy,SUPABASE_URL=zzz,SUPABASE_SERVICE_ROLE=aaa,PUBLIC_URL=https://your-service.run.app
+
+# Set webhook
+python set_webhook.py
 ```
 
-Set `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE` (or `SUPABASE_ANON_KEY` for dev). On startup it begins polling Supabase’s REST API for `python_hello` jobs, appends an assistant memory, and pushes a `notify_user` job that the Node worker delivers to Telegram. Deploy to Cloud Run with the included Dockerfile when you are ready to test end-to-end.
+#### Deploy with Docker
 
-### 6.5. Reels → Maps (WIP)
+```bash
+# Build image
+cd python/agent
+docker build -t omnimap-agent .
 
-- Telegram UI: The “🎬 Reels → Maps” button exists and replies with a placeholder.
+# Run container
+docker run -p 8080:8080 \
+  -e BOT_TOKEN=xxx \
+  -e WEBHOOK_SECRET=yyy \
+  -e SUPABASE_URL=zzz \
+  -e SUPABASE_SERVICE_ROLE=aaa \
+  -e PUBLIC_URL=https://your-domain.com \
+  omnimap-agent
+```
+
+### 6. Background Worker
+
+The background worker is integrated into the FastAPI application and starts automatically when `PYTHON_WORKER_ENABLED=true` (default). It processes all job types:
+
+- `python_hello` - Hello world demo
+- `notify_user` - Send messages to Telegram users
+- `echo_job` - Echo test jobs
+
+The worker polls Supabase every `PYTHON_WORKER_POLL_INTERVAL` seconds (default: 5) for queued jobs.
+
+### 7. Reels → Maps (WIP)
+
+- Telegram UI: The "🎬 Reels → Maps" button exists and replies with a placeholder.
 - Extraction core: A plugin-based orchestrator is scaffolded to support Instagram/TikTok/text inputs.
 - Worker: A generic `extract` job is available that routes inputs through the orchestrator and replies with a summary.
 
-### 7. Prisma (Schema Management)
+### 8. Prisma (Schema Management)
 
 We use Prisma to manage the Postgres (Supabase) schema. Set `DATABASE_URL` in `.env.local` to your Supabase connection string.
 
@@ -166,7 +171,7 @@ The schema is configured to use a pooled URL for runtime and a direct URL for mi
 
 `prisma migrate deploy` uses `DIRECT_URL` under the hood. Ensure outbound access to port 5432 is allowed on your network.
 
-#### Troubleshooting P1001 (can’t reach database server)
+#### Troubleshooting P1001 (can't reach database server)
 
 - Verify `DIRECT_URL` is correct and includes `sslmode=require`.
 - Check your network/VPN/firewall allows outbound `5432` to `db.<PROJECT_REF>.supabase.co`.
@@ -179,24 +184,16 @@ The schema is configured to use a pooled URL for runtime and a direct URL for mi
 ## 🏗️ Project Structure
 
 ```
-src/
-├── app/api/tg/route.ts      # Webhook endpoint for Vercel
-├── bot/bot.ts               # grammY bot instance and handlers
-├── core/                    # Extraction core (types, registry, orchestrator)
-│   ├── types.ts
-│   ├── registry.ts
-│   └── orchestrator.ts
-├── lib/
-│   ├── env.ts              # Environment validation with Zod
-│   └── supabase.ts         # Supabase client setup
-├── plugins/                 # Pluggable extractors (scaffolded)
-│   ├── instagram.ts
-│   ├── tiktok.ts
-│   └── text.ts
-├── worker/index.ts         # Background job processor
-└── dev.ts                  # Local polling mode script
-scripts/
-└── setWebhook.ts           # Webhook registration utility
+python/agent/
+├── main.py                 # FastAPI app + webhook endpoint
+├── bot_handlers.py         # Telegram command handlers
+├── worker.py               # Unified job processor
+├── supabase_client.py      # Supabase REST API client
+├── settings.py             # Environment configuration
+├── set_webhook.py          # Webhook setup script
+├── requirements.txt        # Python dependencies
+└── Dockerfile              # Container image
+
 prisma/
 └── schema.prisma           # Prisma schema for Postgres (Supabase)
 ```
@@ -205,57 +202,35 @@ prisma/
 
 ![System Architecture Diagram](public/diagram.png)
 
-The OmniMap Agent follows a modular architecture where various input sources (Instagram, Telegram, TikTok, WhatsApp) feed into a Next.js webhook endpoint, which then processes content through a Python server with OmniMap Agent Logic before storing results in Supabase.
+The OmniMap Agent follows a modular architecture:
 
-- Plugin-based extraction with a small core:
-  - `core/types.ts`: Common types for inputs, results, and plugins
-  - `core/registry.ts`: Runtime plugin registry (register/get)
-  - `core/orchestrator.ts`: Routes inputs to the best plugin
-  - `plugins/*`: One module per platform/source (Instagram, TikTok, Text)
-- Scales to multiple platforms and input kinds without coupling bot or worker code to platform specifics.
-
-### Add a new plugin (example)
-
-```ts
-// src/plugins/my-source.ts
-import type {
-  ExtractorPlugin,
-  InputRequest,
-  ExtractionResult,
-} from '@/core/types';
-
-const plugin: ExtractorPlugin = {
-  name: 'my-source',
-  canHandle(input) {
-    return /my-source\.com/.test(input.content) ? 0.9 : 0;
-  },
-  async extract(input): Promise<ExtractionResult> {
-    // TODO: implement
-    return { places: [], summary: 'My source WIP' };
-  },
-};
-
-export default plugin;
+```
+┌─────────────────────────────────────────┐
+│      Python FastAPI Agent               │
+│  ┌────────────────────────────────────┐ │
+│  │  Webhook: /api/tg                  │ │
+│  │  Bot: bot_handlers.py (PTB)        │ │
+│  │  Worker: worker.py (unified)       │ │
+│  └────────────────────────────────────┘ │
+└─────────────────────────────────────────┘
+                  │
+                  ▼
+          ┌──────────────┐
+          │   Supabase   │
+          │  (jobs table)│
+          └──────────────┘
 ```
 
 ## 🤖 Bot Commands
 
 - `/start` - Welcome message with interactive buttons
 - `/help` - List available commands
+- `/hello` - Test the Python worker pipeline (demo)
 
 ## 🔧 Scripts
 
 | Script                      | Description                                |
 | --------------------------- | ------------------------------------------ |
-| `pnpm dev`                  | Start Next.js development server           |
-| `pnpm build`                | Build for production                       |
-| `pnpm start`                | Start production server                    |
-| `pnpm lint`                 | Run ESLint                                 |
-| `pnpm lint:fix`             | Run ESLint with auto-fix                   |
-| `pnpm type-check`           | TypeScript checks without emitting         |
-| `pnpm bot:dev`              | Start bot in polling mode (development)    |
-| `pnpm bot:set-webhook`      | Register webhook with Telegram             |
-| `pnpm worker:dev`           | Start background worker                    |
 | `pnpm prisma:generate`      | Generate Prisma client                     |
 | `pnpm prisma:migrate`       | Create/apply a migration from schema       |
 | `pnpm prisma:deploy`        | Apply pending migrations (CI/prod)         |
@@ -264,32 +239,10 @@ export default plugin;
 ## 🔐 Security Notes
 
 - ✅ Webhook endpoints validate secret tokens
-- ✅ Environment variables are validated with Zod
+- ✅ Environment variables are validated
 - ✅ Never commit `.env*` files to version control
 - ⚠️ Keep webhook handlers fast (< 1 second response time)
 - ⚠️ Use background jobs for heavy processing
-
-## 🏃‍♂️ Development Workflow
-
-### Local Development
-
-1. Use `pnpm bot:dev` for quick testing with polling
-2. Bot responds immediately without webhook setup
-3. Perfect for testing commands and logic
-
-### Testing Webhooks Locally
-
-1. Run `pnpm dev` to start Next.js
-2. Use ngrok or similar to expose localhost
-3. Set `PUBLIC_URL` and run `pnpm bot:set-webhook`
-4. Test webhook flow locally
-
-### Production Deployment
-
-1. Deploy to Vercel with environment variables
-2. Run `pnpm bot:set-webhook` with production URL
-3. Bot receives updates via webhooks
-4. Scale background worker as needed
 
 ## 🧭 Roadmap
 
@@ -317,32 +270,6 @@ Phase 4 — Usage & Billing (optional)
 - [ ] Team sharing / collaboration
 - [ ] Billing integration if needed
 
-## 🔧 Customization
-
-### Adding New Commands
-
-Edit `src/bot/bot.ts` and add new command handlers:
-
-```typescript
-bot.command('newcommand', async (ctx) => {
-  await ctx.reply('New command response!');
-});
-```
-
-### Adding Background Jobs
-
-1. Add processor to `src/worker/index.ts`
-2. Create jobs using `createJob()` from Supabase lib
-3. Worker automatically processes queued jobs
-
-### Database Extensions
-
-Extend the Supabase schema as needed for your use case.
-
-## 🧪 Usage Tips
-
-- Click the “🎬 Reels → Maps” button in `/start` to see status (WIP)
-
 ## 🐛 Troubleshooting
 
 ### Bot not responding
@@ -355,7 +282,7 @@ Extend the Supabase schema as needed for your use case.
 
 - Ensure `WEBHOOK_SECRET` matches
 - Verify `PUBLIC_URL` is accessible
-- Check Vercel function logs
+- Check Cloud Run logs
 
 ### Database errors
 
@@ -381,4 +308,4 @@ MIT License - see LICENSE file for details.
 
 ---
 
-Built with ❤️ using Next.js, grammY, and Supabase
+Built with ❤️ using FastAPI, python-telegram-bot, and Supabase

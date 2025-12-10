@@ -1,9 +1,11 @@
-from __future__ import annotations
-
 import datetime as dt
 from typing import Any, Dict, Iterable, List, Optional
 
 import httpx
+
+
+def _now_iso() -> str:
+    return dt.datetime.utcnow().replace(tzinfo=dt.timezone.utc).isoformat()
 
 
 class SupabaseRestClient:
@@ -86,6 +88,49 @@ class SupabaseRestClient:
         )
         resp.raise_for_status()
 
+    def get_session(self, session_id: str) -> Optional[Dict[str, Any]]:
+        """Fetch a session by ID."""
+        params = {
+            "id": f"eq.{session_id}",
+            "limit": "1",
+        }
+        resp = self._client.get("/sessions", params=params)
+        resp.raise_for_status()
+        data: List[Dict[str, Any]] = resp.json()
+        if not data:
+            return None
+        return data[0]
 
-def _now_iso() -> str:
-    return dt.datetime.utcnow().replace(tzinfo=dt.timezone.utc).isoformat()
+    def ensure_session(
+        self,
+        platform: str,
+        platform_user_id: str,
+        platform_chat_id: Optional[int] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Ensure a session exists for a given platform user (upsert)."""
+        now = _now_iso()
+        payload = {
+            "platform": platform,
+            "platform_user_id": platform_user_id,
+            "platform_chat_id": platform_chat_id,
+            "last_message_at": now,
+            "updated_at": now,
+        }
+        if metadata:
+            payload["metadata"] = metadata
+
+        params = {
+            "on_conflict": "platform,platform_user_id",
+        }
+        resp = self._client.post(
+            "/sessions",
+            json=payload,
+            params=params,
+            headers={"Prefer": "resolution=merge-duplicates,return=representation"},
+        )
+        resp.raise_for_status()
+        data: List[Dict[str, Any]] = resp.json()
+        if not data:
+            return None
+        return data[0]
