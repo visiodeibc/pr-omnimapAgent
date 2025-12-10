@@ -1,10 +1,6 @@
+import logging
 from threading import Thread
 from typing import Any, Optional
-
-from dotenv import load_dotenv
-
-# Load environment variables from .env file (must be before other local imports)
-load_dotenv()
 
 from fastapi import FastAPI, Header, HTTPException, Request
 from telegram import Update
@@ -15,21 +11,20 @@ from adapters.instagram import InstagramAdapter
 from adapters.registry import AdapterRegistry, get_adapter_registry
 from adapters.telegram import TelegramAdapter
 from adapters.tiktok import TikTokAdapter
-from agents.orchestrator import AgentOrchestrator
 from bot_handlers import button_callback, hello_command, help_command, start_command
-from logging_config import get_logger, setup_logging
 from settings import get_settings
 from supabase_client import SupabaseRestClient
 from worker import UnifiedWorker
 
-# Initialize structured logging
-setup_logging()
-logger = get_logger(__name__)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+)
+logger = logging.getLogger(__name__)
 
-app = FastAPI(title="OmniMap Agent", version="0.5.0")
+app = FastAPI(title="OmniMap Python Agent", version="0.3.0")
 _worker_thread: Optional[Thread] = None
 _bot_application: Optional[Application] = None
-_agent_orchestrator: Optional[AgentOrchestrator] = None
 
 
 def _initialize_adapters(settings, bot: Optional[Any] = None) -> AdapterRegistry:
@@ -76,16 +71,8 @@ def _initialize_adapters(settings, bot: Optional[Any] = None) -> AdapterRegistry
 
 @app.on_event("startup")
 async def startup() -> None:
-    """Initialize bot, adapters, agent orchestrator, and start worker on startup."""
+    """Initialize bot, adapters, and start worker on startup."""
     settings = get_settings()
-
-    logger.info(
-        "Starting OmniMap Agent",
-        extra={
-            "environment": settings.environment,
-            "agent_enabled": settings.agent_enabled,
-        },
-    )
 
     # Initialize Telegram bot application
     global _bot_application  # noqa: PLW0603
@@ -114,21 +101,6 @@ async def startup() -> None:
     adapter_registry = _initialize_adapters(settings, _bot_application.bot)
     logger.info("Enabled platforms: %s", settings.enabled_platforms)
 
-    # Initialize agent orchestrator if OpenAI is configured
-    global _agent_orchestrator  # noqa: PLW0603
-    if settings.openai:
-        _agent_orchestrator = AgentOrchestrator(
-            openai_api_key=settings.openai.api_key,
-            model=settings.openai.model,
-            supabase_client=supabase_client,
-        )
-        logger.info(
-            "Agent orchestrator initialized",
-            extra={"model": settings.openai.model},
-        )
-    else:
-        logger.warning("OpenAI not configured, agentic workflow disabled")
-
     # Start background worker if enabled
     if not settings.enable_worker:
         logger.info("Python worker disabled via environment flag")
@@ -147,7 +119,9 @@ async def shutdown() -> None:
     """Cleanup on shutdown."""
     # Shutdown adapters
     registry = get_adapter_registry()
+    import asyncio
 
+    loop = asyncio.get_event_loop()
     await registry.shutdown_all()
 
     if _bot_application:
@@ -163,10 +137,8 @@ def healthcheck() -> dict[str, Any]:
     return {
         "status": "ok",
         "bot": "omnimap-agent",
-        "version": "0.5.0",
-        "environment": settings.environment,
+        "version": "0.3.0",
         "platforms": settings.enabled_platforms,
-        "agent_enabled": settings.agent_enabled,
     }
 
 
@@ -206,78 +178,28 @@ async def telegram_webhook(
 
 
 # =============================================================================
-# Common Webhook Processing
-# =============================================================================
-
-
-async def _process_platform_webhook(
-    platform: Platform,
-    adapter: Any,
-    data: dict,
-) -> dict[str, Any]:
-    """
-    Common webhook processing logic for all platforms.
-
-    Parses incoming message and routes through agent orchestrator.
-
-    Args:
-        platform: Source platform
-        adapter: Platform adapter for parsing
-        data: Raw webhook payload
-
-    Returns:
-        Response dict with processing status
-    """
-    incoming = adapter.parse_incoming(data)
-
-    if not incoming:
-        logger.debug(
-            "Webhook payload was not a processable message",
-            extra={"platform": platform.value},
-        )
-        return {"status": "ok", "processed": False}
-
-    logger.info(
-        "Message received",
-        extra={
-            "platform": platform.value,
-            "user_id": incoming.user.platform_user_id,
-            "content_preview": incoming.text[:50] if incoming.text else "(media)",
-        },
-    )
-
-    # Process through agent orchestrator if available
-    if _agent_orchestrator:
-        result = await _agent_orchestrator.process_incoming_message(incoming)
-        logger.info(
-            "Agent processed message",
-            extra={
-                "platform": platform.value,
-                "handler": result.handler_name,
-                "content_type": result.content_type.value,
-                "success": result.success,
-            },
-        )
-        return {"status": "ok", "processed": True, "content_type": result.content_type.value}
-
-    logger.debug("Agent orchestrator not available, skipping processing")
-    return {"status": "ok", "processed": False}
-
-
-# =============================================================================
 # Instagram Webhook
 # =============================================================================
 
 
 @app.get("/api/instagram")
-async def instagram_webhook_verify(request: Request) -> Any:
-    """Handle Instagram webhook verification (GET request)."""
+async def instagram_webhook_verify(
+    request: Request,
+) -> Any:
+    """
+    Handle Instagram webhook verification (GET request).
+
+    Meta requires this endpoint to respond to a verification challenge
+    when setting up the webhook.
+    """
     params = request.query_params
     mode = params.get("hub.mode")
     token = params.get("hub.verify_token")
     challenge = params.get("hub.challenge")
 
     settings = get_settings()
+
+    # Use app secret as verify token for simplicity, or configure a separate one
     verify_token = (
         settings.instagram.app_secret if settings.instagram else None
     ) or "omnimap_verify"
@@ -296,26 +218,46 @@ async def instagram_webhook(request: Request) -> dict[str, Any]:
     settings = get_settings()
 
     if not settings.instagram:
+        logger.warning("Received Instagram webhook but Instagram is not configured")
         raise HTTPException(status_code=501, detail="Instagram not configured")
 
+    # Get the adapter for signature validation and parsing
     registry = get_adapter_registry()
     adapter = registry.get(Platform.INSTAGRAM)
+
     if not adapter:
         raise HTTPException(status_code=501, detail="Instagram adapter not available")
 
     # Validate webhook signature
     body = await request.body()
-    if not adapter.validate_webhook(dict(request.headers), body):
+    headers = dict(request.headers)
+    if not adapter.validate_webhook(headers, body):
         logger.error("Invalid Instagram webhook signature")
         raise HTTPException(status_code=401, detail="Invalid signature")
 
+    # Parse the webhook payload
     try:
         data = await request.json()
-        return await _process_platform_webhook(Platform.INSTAGRAM, adapter, data)
-    except HTTPException:
-        raise
+        logger.info("Received Instagram webhook: %s", data.get("object", "unknown"))
+
+        # Parse into normalized message
+        incoming = adapter.parse_incoming(data)
+
+        if incoming:
+            logger.info(
+                "Instagram message from %s: %s",
+                incoming.user.platform_user_id,
+                incoming.text[:50] if incoming.text else "(media)",
+            )
+
+            # TODO: Route to message handler pipeline
+            # For now, just acknowledge receipt
+            # Future: Create a job for processing, similar to Telegram
+
+        return {"status": "ok"}
+
     except Exception as exc:
-        logger.exception("Error processing Instagram webhook", extra={"error": str(exc)})
+        logger.exception("Error processing Instagram webhook: %s", exc)
         raise HTTPException(status_code=500, detail="Internal server error") from exc
 
 
@@ -326,11 +268,18 @@ async def instagram_webhook(request: Request) -> dict[str, Any]:
 
 @app.get("/api/tiktok")
 async def tiktok_webhook_verify(request: Request) -> Any:
-    """Handle TikTok webhook verification (GET request)."""
-    challenge = request.query_params.get("challenge")
+    """
+    Handle TikTok webhook verification (GET request).
+
+    TikTok sends a challenge that must be echoed back.
+    """
+    params = request.query_params
+    challenge = params.get("challenge")
+
     if challenge:
         logger.info("TikTok webhook verification challenge received")
         return {"challenge": challenge}
+
     raise HTTPException(status_code=400, detail="Missing challenge parameter")
 
 
@@ -340,72 +289,78 @@ async def tiktok_webhook(request: Request) -> dict[str, Any]:
     settings = get_settings()
 
     if not settings.tiktok:
+        logger.warning("Received TikTok webhook but TikTok is not configured")
         raise HTTPException(status_code=501, detail="TikTok not configured")
 
+    # Get the adapter for signature validation and parsing
     registry = get_adapter_registry()
     adapter = registry.get(Platform.TIKTOK)
+
     if not adapter:
         raise HTTPException(status_code=501, detail="TikTok adapter not available")
 
     # Validate webhook signature
     body = await request.body()
-    if not adapter.validate_webhook(dict(request.headers), body):
+    headers = dict(request.headers)
+    if not adapter.validate_webhook(headers, body):
         logger.error("Invalid TikTok webhook signature")
         raise HTTPException(status_code=401, detail="Invalid signature")
 
+    # Parse the webhook payload
     try:
         data = await request.json()
-        return await _process_platform_webhook(Platform.TIKTOK, adapter, data)
-    except HTTPException:
-        raise
-    except Exception as exc:
-        logger.exception("Error processing TikTok webhook", extra={"error": str(exc)})
-        raise HTTPException(status_code=500, detail="Internal server error") from exc
+        logger.info("Received TikTok webhook event: %s", data.get("event", "unknown"))
 
+        # Parse into normalized message
+        incoming = adapter.parse_incoming(data)
 
-# =============================================================================
-# Unified Webhook Endpoint
-# =============================================================================
-
-
-@app.post("/api/message")
-async def unified_message_webhook(request: Request) -> dict[str, Any]:
-    """
-    Unified webhook endpoint for testing and forwarding.
-
-    Expects JSON body with:
-    - platform: 'telegram' | 'instagram' | 'tiktok'
-    - payload: Platform-specific webhook payload
-
-    Note: This endpoint does NOT validate signatures (use for testing only).
-    """
-    try:
-        data = await request.json()
-        platform_str = data.get("platform")
-        payload = data.get("payload")
-
-        if not platform_str or not payload:
-            raise HTTPException(
-                status_code=400,
-                detail="Missing 'platform' or 'payload' in request body",
+        if incoming:
+            logger.info(
+                "TikTok event from %s: %s",
+                incoming.user.platform_user_id,
+                incoming.metadata.get("event_type", "unknown"),
             )
 
-        try:
-            platform = Platform(platform_str.lower())
-        except ValueError:
-            raise HTTPException(status_code=400, detail=f"Unknown platform: {platform_str}")
+            # TODO: Route to message handler pipeline
+            # For now, just acknowledge receipt
 
-        logger.info("Received unified webhook", extra={"platform": platform.value})
+        return {"status": "ok"}
 
-        registry = get_adapter_registry()
-        adapter = registry.get(platform)
-        if not adapter:
-            return {"status": "error", "reason": f"No adapter for platform: {platform.value}"}
-
-        return await _process_platform_webhook(platform, adapter, payload)
-
-    except HTTPException:
-        raise
     except Exception as exc:
-        logger.exception("Error processing unified webhook", extra={"error": str(exc)})
+        logger.exception("Error processing TikTok webhook: %s", exc)
         raise HTTPException(status_code=500, detail="Internal server error") from exc
+
+
+# =============================================================================
+# Generic Message Handler (for future unified processing)
+# =============================================================================
+
+
+async def handle_incoming_message(platform: Platform, data: dict) -> None:
+    """
+    Generic handler for incoming messages from any platform.
+
+    This can be expanded to create jobs for processing, similar to how
+    Telegram commands work.
+    """
+    registry = get_adapter_registry()
+    adapter = registry.get(platform)
+
+    if not adapter:
+        logger.error("No adapter for platform: %s", platform.value)
+        return
+
+    incoming = adapter.parse_incoming(data)
+    if not incoming:
+        return
+
+    # Log the message
+    logger.info(
+        "[%s] Message from %s: %s",
+        platform.value,
+        incoming.user.display_name,
+        incoming.text[:100] if incoming.text else "(media)",
+    )
+
+    # TODO: Create session, create job, etc.
+    # This is where you'd implement the unified message handling pipeline

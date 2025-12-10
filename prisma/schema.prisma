@@ -27,6 +27,15 @@ enum Platform {
   web
 }
 
+enum ContentType {
+  place_name       // User mentioned a place name
+  question         // User asked a question
+  instagram_link   // Link to Instagram post/reel
+  tiktok_link      // Link to TikTok post/reel
+  other_link       // Other URL links
+  unknown          // Could not classify
+}
+
 // Tables
 model Waitlist {
   user_id            BigInt   @id @map("user_id")
@@ -52,6 +61,7 @@ model Session {
   updated_at       DateTime  @default(now()) @map("updated_at")
   memories         SessionMemory[]
   jobs             Job[]
+  incomingRequests IncomingRequest[]
 
   @@unique([platform, platformUserId], name: "sessions_platform_user_id_key")
   @@map("sessions")
@@ -86,7 +96,52 @@ model Job {
   updated_at  DateTime   @default(now()) @map("updated_at")
   children    Job[]      @relation("JobChildren")
 
+  // Link to incoming request if this job originated from one
+  incomingRequest   IncomingRequest? @relation(fields: [incomingRequestId], references: [id], onDelete: SetNull)
+  incomingRequestId String?          @db.Uuid @map("incoming_request_id")
+
   @@index([status, created_at], name: "idx_jobs_status_created")
   @@index([sessionId, created_at], name: "idx_jobs_session_created")
   @@map("jobs")
+}
+
+// Incoming requests from all platforms, tracked for agentic processing
+model IncomingRequest {
+  id              String       @id @db.Uuid @default(dbgenerated("gen_random_uuid()"))
+  platform        Platform
+  platformUserId  String       @db.Text @map("platform_user_id")
+  platformChatId  String?      @db.Text @map("platform_chat_id")
+  messageId       String?      @db.Text @map("message_id")
+
+  // Raw content from the user
+  rawContent      String?      @db.Text @map("raw_content")
+
+  // Classification results from the agent
+  contentType     ContentType? @map("content_type")
+  extractedData   Json?        @db.JsonB @map("extracted_data")
+
+  // Processing status
+  status          JobStatus    @default(queued)
+  error           String?      @db.Text
+
+  // Session linkage
+  session         Session?     @relation(fields: [sessionId], references: [id], onDelete: SetNull)
+  sessionId       String?      @db.Uuid @map("session_id")
+
+  // Metadata and raw payload
+  metadata        Json?        @db.JsonB
+  rawPayload      Json?        @db.JsonB @map("raw_payload")
+
+  // Timestamps
+  created_at      DateTime     @default(now()) @map("created_at")
+  updated_at      DateTime     @default(now()) @map("updated_at")
+  processedAt     DateTime?    @map("processed_at")
+
+  // Jobs spawned from this request
+  jobs            Job[]
+
+  @@index([platform, platformUserId], name: "idx_incoming_requests_platform_user")
+  @@index([status, created_at], name: "idx_incoming_requests_status_created")
+  @@index([contentType], name: "idx_incoming_requests_content_type")
+  @@map("incoming_requests")
 }

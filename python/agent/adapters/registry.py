@@ -5,12 +5,12 @@ The registry provides centralized access to all configured adapters,
 enabling the worker to route messages to the correct platform.
 """
 
+import logging
 from typing import Dict, Optional, Type
 
 from adapters.base import MessagingAdapter, Platform
-from logging_config import get_logger
 
-logger = get_logger(__name__)
+logger = logging.getLogger(__name__)
 
 
 class AdapterRegistry:

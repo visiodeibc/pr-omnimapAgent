@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import time
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
@@ -7,11 +8,10 @@ import httpx
 
 from adapters.base import OutgoingMessage, Platform
 from adapters.registry import AdapterRegistry
-from logging_config import get_logger
 from settings import Settings
 from supabase_client import SupabaseRestClient
 
-logger = get_logger(__name__)
+logger = logging.getLogger(__name__)
 
 
 class UnifiedWorker:

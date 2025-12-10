@@ -1,9 +1,7 @@
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Optional
-
-from logging_config import get_environment
 
 
 @dataclass(frozen=True)
@@ -33,14 +31,6 @@ class TikTokSettings:
 
 
 @dataclass(frozen=True)
-class OpenAISettings:
-    """OpenAI API settings for agentic workflow."""
-
-    api_key: str
-    model: str = "gpt-4o-mini"  # Cost-efficient default
-
-
-@dataclass(frozen=True)
 class Settings:
     """Application settings with multi-platform support."""
 
@@ -50,12 +40,6 @@ class Settings:
     poll_interval: float
     enable_worker: bool
     public_url: Optional[str]
-
-    # Environment
-    environment: str = "local"  # local, staging, production
-
-    # OpenAI settings for agentic workflow
-    openai: Optional[OpenAISettings] = None
 
     # Platform-specific settings (optional per platform)
     telegram: Optional[TelegramSettings] = None
@@ -73,16 +57,6 @@ class Settings:
         if self.tiktok:
             platforms.append("tiktok")
         return platforms
-
-    @property
-    def is_production(self) -> bool:
-        """Check if running in production environment."""
-        return self.environment in ("production", "prod")
-
-    @property
-    def agent_enabled(self) -> bool:
-        """Check if agentic workflow is enabled (requires OpenAI)."""
-        return self.openai is not None
 
 
 @lru_cache(maxsize=1)
@@ -103,7 +77,6 @@ def get_settings() -> Settings:
 
     enable_worker = os.getenv("PYTHON_WORKER_ENABLED", "true").lower() not in {"0", "false", "no"}
     public_url = os.getenv("PUBLIC_URL")
-    environment = get_environment()
 
     # Load Telegram settings (required for now, optional in future)
     telegram_settings = None
@@ -143,23 +116,12 @@ def get_settings() -> Settings:
             access_token=os.getenv("TIKTOK_ACCESS_TOKEN"),
         )
 
-    # Load OpenAI settings (optional, enables agentic workflow)
-    openai_settings = None
-    openai_api_key = os.getenv("OPENAI_API_KEY")
-    if openai_api_key:
-        openai_settings = OpenAISettings(
-            api_key=openai_api_key,
-            model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
-        )
-
     return Settings(
         supabase_url=url,
         supabase_key=key,
         poll_interval=max(1.0, interval),
         enable_worker=enable_worker,
         public_url=public_url,
-        environment=environment,
-        openai=openai_settings,
         telegram=telegram_settings,
         instagram=instagram_settings,
         tiktok=tiktok_settings,

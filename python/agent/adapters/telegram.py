@@ -5,6 +5,7 @@ Implements the MessagingAdapter interface for Telegram using python-telegram-bot
 """
 
 import asyncio
+import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
@@ -20,9 +21,8 @@ from adapters.base import (
     Platform,
     UserInfo,
 )
-from logging_config import get_logger
 
-logger = get_logger(__name__)
+logger = logging.getLogger(__name__)
 
 
 class TelegramAdapter(MessagingAdapter):

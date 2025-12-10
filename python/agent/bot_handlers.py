@@ -1,14 +1,13 @@
+import logging
 from typing import TYPE_CHECKING
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
-from logging_config import get_logger
-
 if TYPE_CHECKING:
     from supabase_client import SupabaseRestClient
 
-logger = get_logger(__name__)
+logger = logging.getLogger(__name__)
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

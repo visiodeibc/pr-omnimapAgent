@@ -18,6 +18,7 @@ Reference: https://developers.tiktok.com/doc/tiktok-api-v2-overview
 
 import hashlib
 import hmac
+import logging
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
@@ -33,9 +34,8 @@ from adapters.base import (
     Platform,
     UserInfo,
 )
-from logging_config import get_logger
 
-logger = get_logger(__name__)
+logger = logging.getLogger(__name__)
 
 # TikTok API base URL
 TIKTOK_API_URL = "https://open.tiktokapis.com/v2"
