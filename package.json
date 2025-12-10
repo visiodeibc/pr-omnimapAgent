@@ -13,8 +13,8 @@
     "prisma:deploy:pooler": "DIRECT_URL=\"$DATABASE_URL\" prisma migrate deploy"
   },
   "devDependencies": {
-    "@prisma/client": "^5.18.0",
-    "prisma": "^5.22.0"
+    "@prisma/client": "^7.1.0",
+    "prisma": "^7.1.0"
   },
   "keywords": [
     "telegram",
