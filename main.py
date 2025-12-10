@@ -22,7 +22,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="OmniMap Python Agent", version="0.3.0")
+app = FastAPI(title="OmniMap Agent", version="0.4.0")
 _worker_thread: Optional[Thread] = None
 _bot_application: Optional[Application] = None
 
@@ -119,9 +119,7 @@ async def shutdown() -> None:
     """Cleanup on shutdown."""
     # Shutdown adapters
     registry = get_adapter_registry()
-    import asyncio
 
-    loop = asyncio.get_event_loop()
     await registry.shutdown_all()
 
     if _bot_application:
@@ -137,7 +135,7 @@ def healthcheck() -> dict[str, Any]:
     return {
         "status": "ok",
         "bot": "omnimap-agent",
-        "version": "0.3.0",
+        "version": "0.4.0",
         "platforms": settings.enabled_platforms,
     }
 

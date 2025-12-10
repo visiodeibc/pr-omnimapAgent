@@ -1,25 +1,32 @@
 # Repository Guidelines
 
-## Project Structure & Module Organization
+## Project Structure
 
-- `python/agent/`: Python FastAPI application (main codebase)
-  - `main.py`: FastAPI app with webhook endpoint (`POST /api/tg`) and health check
-  - `bot_handlers.py`: Telegram command handlers (python-telegram-bot)
-  - `worker.py`: Unified background job processor
-  - `supabase_client.py`: Supabase REST API client
-  - `settings.py`: Environment configuration with Pydantic
-  - `set_webhook.py`: Webhook setup script
-- `prisma/`: Database schema and migrations
-  - `schema.prisma`: Prisma schema for Supabase (Postgres)
-  - `migrations/`: SQL migrations
+```
+omnimap-agent/
+├── adapters/              # Platform messaging adapters
+│   ├── base.py            # Abstract interfaces & types
+│   ├── registry.py        # Adapter management
+│   ├── telegram.py        # Telegram adapter
+│   ├── instagram.py       # Instagram adapter
+│   └── tiktok.py          # TikTok adapter
+├── prisma/                # Database schema & migrations
+│   ├── schema.prisma
+│   └── migrations/
+├── main.py                # FastAPI app with webhook endpoints
+├── worker.py              # Unified background job processor
+├── bot_handlers.py        # Telegram command handlers
+├── settings.py            # Environment configuration (Pydantic)
+├── supabase_client.py     # Supabase REST API client
+├── set_webhook.py         # Webhook setup script
+├── requirements.txt       # Python dependencies
+└── Dockerfile             # Container build
+```
 
-## Build, Test, and Development Commands
-
-### Python Agent
+## Build & Development Commands
 
 ```bash
 # Install dependencies
-cd python/agent
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
@@ -37,67 +44,67 @@ PUBLIC_URL=https://your-url.ngrok.io python set_webhook.py
 - `pnpm prisma:migrate`: Create/apply a migration from schema
 - `pnpm prisma:deploy`: Apply pending migrations (CI/prod)
 
-## Coding Style & Naming Conventions
+## Coding Style
 
 - Language: Python 3.11+
-- Formatting: Follow PEP 8, use Black or similar formatter
-- Type hints: Use type annotations throughout
+- Formatting: PEP 8, use Black formatter
+- Type hints: Use annotations throughout
 - Naming: snake_case for variables/functions, PascalCase for classes
-- Env files: use `.env` in `python/agent/` (never commit secrets)
+- Env files: use `.env` at root (never commit secrets)
 
 ## Testing Guidelines
 
-- Framework: pytest (when adding tests)
-- Aim for unit tests on bot handlers and worker functions
+- Framework: pytest
 - Mock Telegram bot and Supabase clients in tests
-- Keep coverage pragmatic for critical paths
+- Focus on bot handlers and worker functions
 
-## Commit & Pull Request Guidelines
+## Commit & PR Guidelines
 
-- Commits: imperative mood, concise subject (<72 chars), scoped when helpful (e.g., "bot:", "worker:")
-- PRs: clear description, link issues, list env/config changes, add screenshots or sample updates where relevant (e.g., bot responses), and test notes
+- Commits: imperative mood, concise (<72 chars)
+- Scope when helpful (e.g., "bot:", "worker:", "adapters:")
+- PRs: clear description, link issues, list env/config changes
 
-## Security & Configuration Tips
+## Security & Configuration
 
-- Required env vars: `BOT_TOKEN`, `WEBHOOK_SECRET`, `PUBLIC_URL`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE`
-- Validate env via `python/agent/settings.py`
-- Keep webhook handlers fast; offload heavy work to background worker
-- For local webhooks, use a tunnel (e.g., ngrok) then run: `PUBLIC_URL=https://... python set_webhook.py`
+Required env vars:
 
-## Prisma Setup
+- `BOT_TOKEN`, `WEBHOOK_SECRET`, `PUBLIC_URL`
+- `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE`
 
-- Add `DATABASE_URL` and `DIRECT_URL` in `.env.local` using Supabase connection strings
-- Schema at `prisma/schema.prisma` defines `jobs` and `sessions` tables
-- Commands: `pnpm prisma:generate`, `pnpm prisma:migrate --name <msg>`, `pnpm prisma:deploy`
-- Prefer migrations via Prisma; avoid manual SQL DDL
+Optional:
+
+- `INSTAGRAM_ACCESS_TOKEN`, `INSTAGRAM_APP_SECRET`, `INSTAGRAM_ACCOUNT_ID`
+- `TIKTOK_CLIENT_KEY`, `TIKTOK_CLIENT_SECRET`, `TIKTOK_ACCESS_TOKEN`
+- `PYTHON_WORKER_POLL_INTERVAL`, `PYTHON_WORKER_ENABLED`
 
 ## Roadmap
 
-Phase 1 — Extraction
+### Phase 1 — Extraction
 
 - [x] Instagram Reels/Post → candidate places with Google Maps links
 - [ ] Accept other inputs (plain text, websites) to extract places
 - [ ] Export results as JSON/CSV for downstream use
 
-Phase 2 — Enrichment
+### Phase 2 — Enrichment
 
 - [ ] Enrich places via Google Places/OpenStreetMap details
 - [ ] De-duplicate/merge candidates; confidence scoring
 - [ ] Region hints and language handling
 
-Phase 3 — Update Suggestions
+### Phase 3 — Update Suggestions
 
 - [ ] Generate suggested map updates (e.g., OSM edits) for review
 - [ ] Human-in-the-loop review flows inside Telegram
 - [ ] Track applied/approved suggestions
 
-Phase 4 — Usage & Billing (optional)
+### Phase 4 — Usage & Billing (optional)
 
 - [ ] Usage logging and quotas
 - [ ] Team sharing / collaboration
 - [ ] Billing integration if needed
 
-Notes
+## Notes
 
 - Focus on map data quality and operator UX
 - Keep webhook handlers fast; defer heavy work to `worker.py`
+- Adapters provide platform abstraction for multi-platform support

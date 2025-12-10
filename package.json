@@ -1,0 +1,28 @@
+{
+  "name": "omnimap-agent",
+  "version": "1.0.0",
+  "description": "OmniMap Agent — map data extraction and analysis bot for Telegram (Python FastAPI + Supabase)",
+  "private": true,
+  "engines": {
+    "node": ">=18.18"
+  },
+  "scripts": {
+    "prisma:generate": "prisma generate",
+    "prisma:migrate": "prisma migrate dev",
+    "prisma:deploy": "prisma migrate deploy",
+    "prisma:deploy:pooler": "DIRECT_URL=\"$DATABASE_URL\" prisma migrate deploy"
+  },
+  "devDependencies": {
+    "@prisma/client": "^5.18.0",
+    "prisma": "^5.22.0"
+  },
+  "keywords": [
+    "telegram",
+    "bot",
+    "fastapi",
+    "python",
+    "supabase"
+  ],
+  "author": "",
+  "license": "MIT"
+}
