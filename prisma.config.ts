@@ -1,15 +1,16 @@
-import { defineConfig } from "prisma/config";
-import dotenv from "dotenv";
-
-dotenv.config();
+import "dotenv/config";
+import { defineConfig, env } from "prisma/config";
 
 export default defineConfig({
-  // DATABASE_URL for Prisma Studio and introspection
+  schema: "prisma/schema.prisma",
   datasource: {
-    url: process.env.DATABASE_URL!,
+    // DATABASE_URL (pooled) for Prisma Studio and runtime
+    url: env("DATABASE_URL"),
+    // DIRECT_URL (non-pooled) for migrations to bypass Supavisor/PgBouncer
+    // @ts-expect-error directUrl is supported but types may lag behind
+    directUrl: env("DIRECT_URL"),
   },
-  // DIRECT_URL (non-pooled) for migrations to avoid pgbouncer issues
-  migrate: {
-    url: process.env.DIRECT_URL,
+  migrations: {
+    path: "prisma/migrations",
   },
 });

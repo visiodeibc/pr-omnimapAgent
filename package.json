@@ -8,12 +8,13 @@
   },
   "scripts": {
     "prisma:generate": "prisma generate",
-    "prisma:migrate": "prisma migrate dev",
-    "prisma:deploy": "prisma migrate deploy",
-    "prisma:deploy:pooler": "DIRECT_URL=\"$DATABASE_URL\" prisma migrate deploy"
+    "prisma:migrate": "sh -c '. ./.env && DATABASE_URL=\"$DIRECT_URL\" prisma migrate dev'",
+    "prisma:deploy": "sh -c '. ./.env && DATABASE_URL=\"$DIRECT_URL\" prisma migrate deploy'",
+    "prisma:studio": "prisma studio"
   },
   "devDependencies": {
     "@prisma/client": "^7.1.0",
+    "dotenv": "^16.6.1",
     "prisma": "^7.1.0"
   },
   "keywords": [

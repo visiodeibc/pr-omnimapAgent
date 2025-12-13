@@ -38,6 +38,7 @@ build/
 
 # Node (for Prisma)
 node_modules/
+.pnpm-store/
 
 # Testing
 .pytest_cache/
