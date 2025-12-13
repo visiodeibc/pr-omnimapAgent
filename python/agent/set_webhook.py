@@ -62,8 +62,8 @@ async def set_webhook() -> None:
         logger.exception("Error setting webhook: %s", exc)
         sys.exit(1)
     finally:
-        # Cleanup
-        await bot.session.close()
+        # Cleanup - shutdown the bot properly
+        await bot.shutdown()
 
 
 def main() -> None:
