@@ -2,7 +2,6 @@
 grant usage on schema public to service_role;
 
 -- Grant table privileges to service_role
-grant select, insert, update, delete on table public.waitlist to service_role;
 grant select, insert, update, delete on table public.jobs to service_role;
 
 -- Grant sequence usage in case of sequences (future-proof)

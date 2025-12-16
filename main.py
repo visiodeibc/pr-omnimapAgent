@@ -8,7 +8,14 @@ load_dotenv()
 
 from fastapi import FastAPI, Header, HTTPException, Request
 from telegram import Update
-from telegram.ext import Application, CallbackQueryHandler, CommandHandler
+from telegram.ext import (
+    Application,
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
 
 from adapters.base import Platform
 from adapters.instagram import InstagramAdapter
@@ -17,6 +24,7 @@ from adapters.telegram import TelegramAdapter
 from adapters.tiktok import TikTokAdapter
 from agents.orchestrator import AgentOrchestrator
 from bot_handlers import button_callback, hello_command, help_command, start_command
+from debug_reporter import create_debug_reporter
 from logging_config import get_logger, setup_logging
 from settings import get_settings
 from supabase_client import SupabaseRestClient
@@ -105,6 +113,16 @@ async def startup() -> None:
     # Register callback query handler for inline buttons
     _bot_application.add_handler(CallbackQueryHandler(button_callback))
 
+    # Register message handler for non-command text messages (routes to agent)
+    # This handles regular text messages through the agentic pipeline
+    _bot_application.add_handler(
+        MessageHandler(
+            filters.TEXT & ~filters.COMMAND,
+            _handle_telegram_message,
+        )
+    )
+    logger.info("Registered message handler for agentic processing")
+
     # Initialize the bot application
     await _bot_application.initialize()
     await _bot_application.start()
@@ -170,6 +188,106 @@ def healthcheck() -> dict[str, Any]:
     }
 
 
+async def _handle_telegram_message(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """
+    Handle incoming Telegram text messages through the agent orchestrator.
+
+    This handler processes non-command messages using the agentic pipeline:
+    1. Parse message using TelegramAdapter
+    2. Classify content with OpenAI
+    3. Route to appropriate handler
+    4. Optionally send response back to user
+
+    Args:
+        update: Telegram Update object
+        context: Telegram context
+    """
+    if not update.message or not update.message.text:
+        return
+
+    settings = get_settings()
+    registry = get_adapter_registry()
+    adapter = registry.get(Platform.TELEGRAM)
+
+    if not adapter:
+        logger.warning("Telegram adapter not available for message processing")
+        return
+
+    # Convert Update to raw payload for adapter parsing
+    raw_payload = update.to_dict()
+    incoming = adapter.parse_incoming(raw_payload)
+
+    if not incoming:
+        logger.debug("Could not parse Telegram message into IncomingMessage")
+        return
+
+    logger.info(
+        "Processing Telegram message through agent pipeline",
+        extra={
+            "user_id": incoming.user.platform_user_id,
+            "chat_id": incoming.chat.platform_chat_id,
+            "content_preview": incoming.text[:50] if incoming.text else "(empty)",
+        },
+    )
+
+    # Create debug reporter for development mode
+    debug_reporter = create_debug_reporter(
+        chat_id=incoming.chat.platform_chat_id,
+        platform=Platform.TELEGRAM,
+        adapter_registry=registry,
+        environment=settings.environment,
+    )
+
+    if debug_reporter.enabled:
+        debug_reporter.info(
+            "Telegram message received",
+            data={
+                "from": incoming.user.display_name,
+                "text": (incoming.text or "")[:100],
+            },
+        )
+
+    # Process through agent orchestrator if available
+    if _agent_orchestrator:
+        try:
+            result = await _agent_orchestrator.process_incoming_message(
+                incoming,
+                debug_reporter=debug_reporter,
+            )
+
+            logger.info(
+                "Agent processed Telegram message",
+                extra={
+                    "handler": result.handler_name,
+                    "content_type": result.content_type.value,
+                    "success": result.success,
+                },
+            )
+
+            # Flush debug logs to user in dev mode
+            if debug_reporter.enabled:
+                await debug_reporter.flush()
+
+            # Send response to user if handler provided a message
+            if result.message:
+                await update.message.reply_text(result.message)
+
+        except Exception as exc:
+            logger.exception("Error processing message through agent: %s", exc)
+            if debug_reporter.enabled:
+                debug_reporter.error("Agent processing failed", data={"error": str(exc)})
+                await debug_reporter.flush()
+    else:
+        # No orchestrator available
+        if debug_reporter.enabled:
+            debug_reporter.warn("Agent orchestrator not available")
+            await debug_reporter.flush()
+
+        logger.debug("Agent orchestrator not available, skipping message processing")
+
+
 # =============================================================================
 # Telegram Webhook
 # =============================================================================
@@ -219,6 +337,7 @@ async def _process_platform_webhook(
     Common webhook processing logic for all platforms.
 
     Parses incoming message and routes through agent orchestrator.
+    In development mode, sends debug logs back to the user.
 
     Args:
         platform: Source platform
@@ -228,6 +347,7 @@ async def _process_platform_webhook(
     Returns:
         Response dict with processing status
     """
+    settings = get_settings()
     incoming = adapter.parse_incoming(data)
 
     if not incoming:
@@ -246,9 +366,26 @@ async def _process_platform_webhook(
         },
     )
 
+    # Create debug reporter for development mode
+    debug_reporter = create_debug_reporter(
+        chat_id=incoming.chat.platform_chat_id,
+        platform=platform,
+        adapter_registry=get_adapter_registry(),
+        environment=settings.environment,
+    )
+
+    if debug_reporter.enabled:
+        debug_reporter.info("Message received", data={
+            "from": incoming.user.display_name,
+            "text": (incoming.text or "")[:100],
+        })
+
     # Process through agent orchestrator if available
     if _agent_orchestrator:
-        result = await _agent_orchestrator.process_incoming_message(incoming)
+        result = await _agent_orchestrator.process_incoming_message(
+            incoming,
+            debug_reporter=debug_reporter,
+        )
         logger.info(
             "Agent processed message",
             extra={
@@ -258,7 +395,18 @@ async def _process_platform_webhook(
                 "success": result.success,
             },
         )
+
+        # Flush debug logs to user in dev mode
+        if debug_reporter.enabled:
+            await debug_reporter.flush()
+
         return {"status": "ok", "processed": True, "content_type": result.content_type.value}
+
+    # No orchestrator - just send debug info if in dev mode
+    if debug_reporter.enabled:
+        debug_reporter.warn("Agent orchestrator not available")
+        debug_reporter.info("Message echo", data={"text": incoming.text})
+        await debug_reporter.flush()
 
     logger.debug("Agent orchestrator not available, skipping processing")
     return {"status": "ok", "processed": False}

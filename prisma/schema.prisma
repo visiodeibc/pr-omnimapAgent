@@ -34,19 +34,6 @@ enum ContentType {
 }
 
 // Tables
-model Waitlist {
-  user_id            BigInt   @id @map("user_id")
-  username           String?  @db.Text
-  first_name         String?  @db.Text @map("first_name")
-  last_name          String?  @db.Text @map("last_name")
-  email              String?  @db.Text
-  pref_solana_wallet String?  @db.Text @map("pref_solana_wallet")
-  joined_at          DateTime @default(now()) @map("joined_at")
-  source             String?  @db.Text
-
-  @@map("waitlist")
-}
-
 model Session {
   id               String    @id @db.Uuid @default(dbgenerated("gen_random_uuid()"))
   platform         Platform

@@ -95,7 +95,7 @@ uvicorn main:app --reload --host 0.0.0.0 --port 8080
 # Terminal 2: Expose with ngrok
 ngrok http 8080
 
-# Terminal 3: Set webhook
+# Terminal 3: Set webhook [if they are changed or not set]
 PUBLIC_URL=https://your-ngrok-url.ngrok.io python set_webhook.py
 ```
 

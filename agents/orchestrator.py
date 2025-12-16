@@ -10,9 +10,11 @@ This module contains the main orchestrator that:
 Uses OpenAI's function calling for intelligent classification and routing.
 """
 
+from __future__ import annotations
+
 import json
 from datetime import datetime, timezone
-from typing import Any, Dict, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple
 
 from openai import AsyncOpenAI, OpenAI
 
@@ -27,6 +29,9 @@ from agents.types import (
     UnifiedRequest,
 )
 from logging_config import get_logger
+
+if TYPE_CHECKING:
+    from debug_reporter import DebugReporter
 
 logger = get_logger(__name__)
 
@@ -279,6 +284,7 @@ class AgentOrchestrator:
         self,
         incoming: IncomingMessage,
         session_id: Optional[str] = None,
+        debug_reporter: Optional["DebugReporter"] = None,
     ) -> HandlerResult:
         """
         Process an incoming message through the full agentic pipeline.
@@ -292,6 +298,7 @@ class AgentOrchestrator:
         Args:
             incoming: Platform-specific incoming message
             session_id: Optional session ID for context
+            debug_reporter: Optional DebugReporter for dev logging to user
 
         Returns:
             HandlerResult from the appropriate handler
@@ -306,23 +313,65 @@ class AgentOrchestrator:
             },
         )
 
+        # Debug: Log pipeline start
+        if debug_reporter:
+            debug_reporter.step("Pipeline started", data={
+                "platform": incoming.platform.value,
+                "user": incoming.user.display_name,
+                "message_id": incoming.message_id,
+            })
+
         # Step 1: Convert to unified request
         request = self.convert_to_unified_request(incoming)
+        if debug_reporter:
+            debug_reporter.step("Converted to unified request", data={
+                "content_preview": (request.raw_content or "")[:50],
+            })
 
         # Step 2: Store incoming request in database (if available)
         request_id = None
         if self._supabase:
             request_id = await self._store_incoming_request(request, session_id)
+            if debug_reporter:
+                debug_reporter.debug("Stored request in database", data={
+                    "request_id": request_id,
+                })
 
         # Step 3: Classify content
+        if debug_reporter:
+            debug_reporter.step("Classifying content with OpenAI", data={
+                "model": self._model,
+            })
+
         content_type, extracted = await self.classify_content(request)
+
+        if debug_reporter:
+            debug_reporter.success("Content classified", data={
+                "content_type": content_type.value,
+                "confidence": extracted.confidence,
+            })
 
         # Step 4: Update request with classification (if stored)
         if self._supabase and request_id:
             await self._update_request_classification(request_id, content_type, extracted)
 
         # Step 5: Dispatch to handler
+        if debug_reporter:
+            debug_reporter.step(f"Dispatching to handler: {content_type.value}")
+
         result = await dispatch_handler(content_type, request, extracted, session_id)
+
+        if debug_reporter:
+            if result.success:
+                debug_reporter.success("Handler completed", data={
+                    "handler": result.handler_name,
+                    "follow_up_actions": result.follow_up_actions,
+                })
+            else:
+                debug_reporter.error("Handler failed", data={
+                    "handler": result.handler_name,
+                    "error": result.error,
+                })
 
         # Step 6: Update request status (if stored)
         if self._supabase and request_id:
@@ -337,6 +386,10 @@ class AgentOrchestrator:
                 "request_id": request_id,
             },
         )
+
+        # Debug: Log pipeline completion
+        if debug_reporter:
+            debug_reporter.step("Pipeline completed")
 
         return result
 
