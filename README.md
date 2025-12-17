@@ -21,6 +21,10 @@ omnimap-agent/
 │   ├── telegram.py        # Telegram adapter (full)
 │   ├── instagram.py       # Instagram adapter (ready)
 │   └── tiktok.py          # TikTok adapter (scaffold)
+├── agents/                # Agentic workflow components
+│   ├── handlers.py        # Content-type specific handlers
+│   ├── orchestrator.py    # Main agent orchestrator
+│   └── types.py           # Types & OpenAI function definitions
 ├── prisma/                # Database schema & migrations
 │   ├── schema.prisma
 │   └── migrations/
@@ -176,6 +180,77 @@ docker run -p 8080:8080 \
                       │   Supabase   │
                       │  (jobs table)│
                       └──────────────┘
+```
+
+## 🧠 Content Handlers
+
+The agentic workflow classifies incoming messages and routes them to specialized handlers. Each handler processes a specific content type and returns a structured `HandlerResult`.
+
+### Content Types & Handlers
+
+| Content Type        | Handler                 | Description                                              |
+| ------------------- | ----------------------- | -------------------------------------------------------- |
+| 📍 `PLACE_NAME`     | `handle_place_name`     | Direct place name mentions (e.g., "Cafe Central Vienna") |
+| ❓ `QUESTION`       | `handle_question`       | Questions about places, usage, or general queries        |
+| 📸 `INSTAGRAM_LINK` | `handle_instagram_link` | Instagram post/reel links for place extraction           |
+| 🎵 `TIKTOK_LINK`    | `handle_tiktok_link`    | TikTok video links for place extraction                  |
+| 🔗 `OTHER_LINK`     | `handle_other_link`     | Other URLs (articles, map links, business listings)      |
+| ❔ `UNKNOWN`        | `handle_unknown`        | Unclassified messages requiring clarification            |
+
+### Handler Flow
+
+```
+User Message
+     │
+     ▼
+┌─────────────────┐
+│  Orchestrator   │  ← Classifies content using LLM
+│  (classify)     │
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
+│ dispatch_handler│  ← Routes to appropriate handler
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
+│ Content Handler │  ← Processes content, queues follow-up jobs
+│ (e.g., IG link) │
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────┐
+│ HandlerResult   │  ← Returns structured result with data & actions
+└─────────────────┘
+```
+
+### Handler Responsibilities
+
+Each handler follows a consistent pattern:
+
+1. **Log** the incoming request with relevant metadata
+2. **Process** the content (fetch external data, extract places, etc.)
+3. **Store** results and queue follow-up jobs
+4. **Return** a `HandlerResult` with:
+   - `success`: Whether processing succeeded
+   - `data`: Extracted/processed data
+   - `message`: User-facing response
+   - `follow_up_actions`: Jobs to queue for further processing
+
+### Example: Instagram Link Handler
+
+When a user sends an Instagram link:
+
+```
+Input: https://instagram.com/p/ABC123
+
+1. Extract content ID and username from URL
+2. Fetch Instagram post/reel content via API
+3. Extract location tags from the post
+4. Extract place mentions from caption text
+5. Queue jobs: fetch_instagram_content, extract_location_tags, extract_places_from_caption
+6. Return HandlerResult with extracted data
 ```
 
 ## 🧭 Roadmap
