@@ -22,7 +22,7 @@ Send me any place name and I'll find it on Google Maps with ratings, reviews, an
 <i>Example: "Blue Bottle Coffee Tokyo"</i>
 
 💬 <b>Chat</b>
-Ask me questions about places or just say hi! I remember our conversation for 30 minutes.
+Ask me anything about places or great cafes or restaurants in your area!
 
 <b>🚀 Try it now:</b>
 Send me a place name like "Eiffel Tower" to get started!"""
