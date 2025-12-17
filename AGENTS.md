@@ -10,14 +10,20 @@ omnimap-agent/
 │   ├── telegram.py        # Telegram adapter
 │   ├── instagram.py       # Instagram adapter
 │   └── tiktok.py          # TikTok adapter
+├── agents/                # Agentic workflow components
+│   ├── handlers.py        # Content-type specific handlers
+│   ├── orchestrator.py    # Main agent orchestrator
+│   └── types.py           # Types & OpenAI function definitions
 ├── prisma/                # Database schema & migrations
 │   ├── schema.prisma
 │   └── migrations/
 ├── main.py                # FastAPI app with webhook endpoints
 ├── worker.py              # Unified background job processor
 ├── bot_handlers.py        # Telegram command handlers
-├── settings.py            # Environment configuration (Pydantic)
+├── settings.py            # Environment configuration (dataclasses)
 ├── supabase_client.py     # Supabase REST API client
+├── logging_config.py      # Structured logging (local/production)
+├── debug_reporter.py      # Debug logging to user in dev mode
 ├── set_webhook.py         # Webhook setup script
 ├── requirements.txt       # Python dependencies
 └── Dockerfile             # Container build
@@ -73,9 +79,12 @@ Required env vars:
 
 Optional:
 
+- `OPENAI_API_KEY`, `OPENAI_MODEL` (enables agentic workflow)
 - `INSTAGRAM_ACCESS_TOKEN`, `INSTAGRAM_APP_SECRET`, `INSTAGRAM_ACCOUNT_ID`
 - `TIKTOK_CLIENT_KEY`, `TIKTOK_CLIENT_SECRET`, `TIKTOK_ACCESS_TOKEN`
 - `PYTHON_WORKER_POLL_INTERVAL`, `PYTHON_WORKER_ENABLED`
+- `ENVIRONMENT` (local/staging/production - controls logging format)
+- `LOG_LEVEL` (DEBUG/INFO/WARNING/ERROR)
 
 ## Roadmap
 

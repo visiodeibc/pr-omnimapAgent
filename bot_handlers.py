@@ -1,6 +1,6 @@
 from typing import TYPE_CHECKING
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import Update
 from telegram.ext import ContextTypes
 
 from logging_config import get_logger
@@ -13,17 +13,10 @@ logger = get_logger(__name__)
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle the /start command."""
-    keyboard = [
-        [InlineKeyboardButton("🎬 Reels → Maps", callback_data="reels_start")],
-        [InlineKeyboardButton("🏓 Ping me!", callback_data="ping")],
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-
     await update.message.reply_text(
         "🗺️ OmniMap Agent\n\n"
-        "Extract places from content and turn them into useful map links.\n\n"
-        "Reels → Maps is under construction — tap to see status.",
-        reply_markup=reply_markup,
+        "Extract places from content and turn them into useful map links.\n"
+        "Send a message or /help to see options.",
     )
 
 
@@ -113,20 +106,3 @@ async def hello_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await update.message.reply_text(
             "❌ Something went wrong talking to the Python worker."
         )
-
-
-async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle inline keyboard button presses."""
-    query = update.callback_query
-    await query.answer()
-
-    if query.data == "ping":
-        await query.answer("Pong! 🏓")
-        await query.message.reply_text("🏓 Pong! The bot is working perfectly!")
-    elif query.data == "reels_start":
-        await query.answer("WIP")
-        await query.message.reply_text(
-            "🎬 Reels → Maps is a work in progress. I will update this soon!"
-        )
-    else:
-        await query.answer("Unknown action")

@@ -10,7 +10,6 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from telegram import Update
 from telegram.ext import (
     Application,
-    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
@@ -23,7 +22,7 @@ from adapters.registry import AdapterRegistry, get_adapter_registry
 from adapters.telegram import TelegramAdapter
 from adapters.tiktok import TikTokAdapter
 from agents.orchestrator import AgentOrchestrator
-from bot_handlers import button_callback, hello_command, help_command, start_command
+from bot_handlers import hello_command, help_command, start_command
 from debug_reporter import create_debug_reporter
 from logging_config import get_logger, setup_logging
 from settings import get_settings
@@ -109,9 +108,6 @@ async def startup() -> None:
     _bot_application.add_handler(CommandHandler("start", start_command))
     _bot_application.add_handler(CommandHandler("help", help_command))
     _bot_application.add_handler(CommandHandler("hello", hello_command))
-
-    # Register callback query handler for inline buttons
-    _bot_application.add_handler(CallbackQueryHandler(button_callback))
 
     # Register message handler for non-command text messages (routes to agent)
     # This handles regular text messages through the agentic pipeline

@@ -3,11 +3,14 @@
 
 import asyncio
 import logging
+import os
 import sys
 
+from dotenv import load_dotenv
 from telegram import Bot
 
-from settings import get_settings
+# Load .env file if present
+load_dotenv()
 
 logging.basicConfig(
     level=logging.INFO,
@@ -18,15 +21,26 @@ logger = logging.getLogger(__name__)
 
 async def set_webhook() -> None:
     """Set the Telegram webhook."""
-    settings = get_settings()
+    # Only load what we need for webhook setup
+    bot_token = os.getenv("BOT_TOKEN")
+    webhook_secret = os.getenv("WEBHOOK_SECRET")
+    public_url = os.getenv("PUBLIC_URL")
 
-    if not settings.public_url:
+    if not bot_token:
+        logger.error("BOT_TOKEN is required")
+        sys.exit(1)
+
+    if not webhook_secret:
+        logger.error("WEBHOOK_SECRET is required")
+        sys.exit(1)
+
+    if not public_url:
         logger.error("PUBLIC_URL is required to set webhook")
         sys.exit(1)
 
-    webhook_url = f"{settings.public_url.rstrip('/')}/api/tg"
+    webhook_url = f"{public_url.rstrip('/')}/api/tg"
 
-    bot = Bot(token=settings.telegram.bot_token)
+    bot = Bot(token=bot_token)
 
     try:
         # Delete existing webhook first
@@ -37,7 +51,7 @@ async def set_webhook() -> None:
         logger.info("Setting webhook to: %s", webhook_url)
         success = await bot.set_webhook(
             url=webhook_url,
-            secret_token=settings.telegram.webhook_secret,
+            secret_token=webhook_secret,
             allowed_updates=["message", "callback_query"],
             drop_pending_updates=True,
         )
@@ -63,7 +77,7 @@ async def set_webhook() -> None:
         sys.exit(1)
     finally:
         # Cleanup
-        await bot.session.close()
+        await bot.shutdown()
 
 
 def main() -> None:
