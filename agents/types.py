@@ -19,11 +19,10 @@ class ContentType(str, Enum):
     """
 
     PLACE_NAME = "place_name"  # User mentioned a place name
-    QUESTION = "question"  # User asked a question
+    CONVERSATION = "conversation"  # Questions, greetings, general chat
     INSTAGRAM_LINK = "instagram_link"  # Link to Instagram post/reel
     TIKTOK_LINK = "tiktok_link"  # Link to TikTok post/reel
     OTHER_LINK = "other_link"  # Other URL links
-    UNKNOWN = "unknown"  # Could not classify
 
 
 @dataclass
@@ -79,7 +78,7 @@ class ExtractedData:
 
     The content varies based on the content_type:
     - PLACE_NAME: place_name, location_hints, confidence
-    - QUESTION: question_text, topic, intent
+    - CONVERSATION: message_text, topic, intent (questions, greetings, general chat)
     - INSTAGRAM_LINK: url, post_id, username, content_type (post/reel)
     - TIKTOK_LINK: url, video_id, username
     - OTHER_LINK: url, domain, description
@@ -94,10 +93,10 @@ class ExtractedData:
     place_name: Optional[str] = None
     location_hints: List[str] = field(default_factory=list)
 
-    # Question-related fields
-    question_text: Optional[str] = None
-    question_topic: Optional[str] = None
-    question_intent: Optional[str] = None
+    # Conversation-related fields (questions, greetings, general chat)
+    message_text: Optional[str] = None
+    message_topic: Optional[str] = None
+    message_intent: Optional[str] = None
 
     # Link-related fields
     url: Optional[str] = None
@@ -121,12 +120,12 @@ class ExtractedData:
             result["place_name"] = self.place_name
         if self.location_hints:
             result["location_hints"] = self.location_hints
-        if self.question_text:
-            result["question_text"] = self.question_text
-        if self.question_topic:
-            result["question_topic"] = self.question_topic
-        if self.question_intent:
-            result["question_intent"] = self.question_intent
+        if self.message_text:
+            result["message_text"] = self.message_text
+        if self.message_topic:
+            result["message_topic"] = self.message_topic
+        if self.message_intent:
+            result["message_intent"] = self.message_intent
         if self.url:
             result["url"] = self.url
         if self.link_domain:
@@ -216,29 +215,29 @@ CONTENT_CLASSIFICATION_FUNCTIONS = [
     {
         "type": "function",
         "function": {
-            "name": "classify_as_question",
-            "description": "Classify the message as a question. Use this when the user is asking for information, help, or clarification.",
+            "name": "classify_as_conversation",
+            "description": "Classify the message as general conversation. Use this for: questions, greetings (hi, hello), casual chat, requests for help, unclear messages, or anything that doesn't fit other categories.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "question_text": {
+                    "message_text": {
                         "type": "string",
-                        "description": "The full question text",
+                        "description": "The full message text",
                     },
                     "topic": {
                         "type": "string",
-                        "description": "The topic of the question (e.g., 'place_info', 'directions', 'recommendations', 'how_to_use', 'general')",
+                        "description": "The topic (e.g., 'greeting', 'question', 'help_request', 'place_info', 'how_to_use', 'general', 'unclear')",
                     },
                     "intent": {
                         "type": "string",
-                        "description": "The intent behind the question (e.g., 'get_info', 'get_recommendation', 'get_help')",
+                        "description": "The intent (e.g., 'greet', 'get_info', 'get_recommendation', 'get_help', 'chat', 'unclear')",
                     },
                     "confidence": {
                         "type": "number",
                         "description": "Confidence level from 0.0 to 1.0",
                     },
                 },
-                "required": ["question_text", "confidence"],
+                "required": ["message_text", "confidence"],
             },
         },
     },
@@ -334,46 +333,189 @@ CONTENT_CLASSIFICATION_FUNCTIONS = [
             },
         },
     },
+]
+
+
+# Memory-related function definitions for the agent
+# These allow the agent to explicitly query or save important information
+MEMORY_FUNCTIONS = [
     {
         "type": "function",
         "function": {
-            "name": "classify_as_unknown",
-            "description": "Use this when the message cannot be confidently classified into any other category.",
+            "name": "query_memory",
+            "description": "Search the user's conversation history for relevant context. Use this when the current message references past conversations, previously mentioned places, or needs historical context to understand properly.",
             "parameters": {
                 "type": "object",
                 "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "What to search for in the conversation history (e.g., 'previously mentioned restaurants', 'places near Tokyo')",
+                    },
+                    "time_range": {
+                        "type": "string",
+                        "enum": ["recent", "all"],
+                        "description": "Time range to search: 'recent' for current session only, 'all' for all history",
+                    },
                     "reason": {
                         "type": "string",
-                        "description": "Brief explanation of why classification failed",
-                    },
-                    "possible_types": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "List of content types this might be",
+                        "description": "Brief explanation of why this memory lookup is needed",
                     },
                 },
-                "required": ["reason"],
+                "required": ["query", "reason"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "save_to_memory",
+            "description": "Save important information for long-term recall. Use this for user preferences, frequently mentioned places, or context that should be remembered across sessions.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "content": {
+                        "type": "string",
+                        "description": "The information to remember",
+                    },
+                    "category": {
+                        "type": "string",
+                        "enum": ["preference", "place", "context"],
+                        "description": "Category of information: 'preference' for user settings, 'place' for locations, 'context' for other important info",
+                    },
+                    "reason": {
+                        "type": "string",
+                        "description": "Why this information should be saved for future reference",
+                    },
+                },
+                "required": ["content", "category", "reason"],
             },
         },
     },
 ]
+
 
 # System prompt for the classification agent
 CLASSIFICATION_SYSTEM_PROMPT = """You are a message classification agent for OmniMap, a service that helps users discover and manage places.
 
 Your job is to analyze incoming messages and classify them into one of these categories:
 1. **place_name**: The message mentions a specific place (restaurant, cafe, hotel, landmark, etc.)
-2. **question**: The message is asking a question
+2. **conversation**: Questions, greetings (hi, hello), requests for help, general chat, or unclear messages
 3. **instagram_link**: The message contains an Instagram URL (post, reel, story)
 4. **tiktok_link**: The message contains a TikTok URL
 5. **other_link**: The message contains some other URL
-6. **unknown**: Cannot confidently classify
 
 Guidelines:
 - Look for Instagram URLs like: instagram.com/p/..., instagram.com/reel/..., instagr.am/...
 - Look for TikTok URLs like: tiktok.com/@user/video/..., vm.tiktok.com/...
 - A place name might be mentioned alongside a question - in that case, classify based on the primary intent
-- Be confident in your classification - only use 'unknown' when truly uncertain
+- Use 'conversation' for greetings, questions, help requests, and anything that doesn't fit other categories
 - Extract as much structured data as possible from the message
 
 Always call exactly one classification function based on your analysis."""
+
+
+# System prompt template with conversation context
+CLASSIFICATION_SYSTEM_PROMPT_WITH_CONTEXT_TEMPLATE = """You are a message classification agent for OmniMap, a service that helps users discover and manage places.
+
+Your job is to analyze incoming messages and classify them into one of these categories:
+1. **place_name**: The message mentions a specific place (restaurant, cafe, hotel, landmark, etc.)
+2. **conversation**: Questions, greetings (hi, hello), requests for help, general chat, or unclear messages
+3. **instagram_link**: The message contains an Instagram URL (post, reel, story)
+4. **tiktok_link**: The message contains a TikTok URL
+5. **other_link**: The message contains some other URL
+
+## Recent Conversation Context
+The following is the recent conversation history with this user. Use it to understand context, references to previous messages, and the user's ongoing intent:
+
+{conversation_history}
+
+## Guidelines
+- Consider the conversation context when classifying messages
+- The user may reference previous messages (e.g., "that place", "the one I mentioned")
+- If the user asks a follow-up question about a previously mentioned place, classify based on their current intent
+- Look for Instagram URLs like: instagram.com/p/..., instagram.com/reel/..., instagr.am/...
+- Look for TikTok URLs like: tiktok.com/@user/video/..., vm.tiktok.com/...
+- A place name might be mentioned alongside a question - classify based on the primary intent
+- Use 'conversation' for greetings, questions, help requests, and anything that doesn't fit other categories
+- Extract as much structured data as possible from the message
+
+Always call exactly one classification function based on your analysis."""
+
+
+def build_classification_prompt_with_context(conversation_history: str) -> str:
+    """
+    Build a classification system prompt that includes conversation context.
+
+    Args:
+        conversation_history: Formatted string of recent conversation messages
+
+    Returns:
+        Complete system prompt with conversation context
+    """
+    if not conversation_history:
+        return CLASSIFICATION_SYSTEM_PROMPT
+
+    return CLASSIFICATION_SYSTEM_PROMPT_WITH_CONTEXT_TEMPLATE.format(
+        conversation_history=conversation_history
+    )
+
+
+# System prompt for generating contextual responses to conversation messages
+CONVERSATION_RESPONSE_SYSTEM_PROMPT = """You are OmniMap, a helpful assistant that helps users discover and manage places from social media content.
+
+Your capabilities:
+- Extract place names and locations from Instagram/TikTok links
+- Search for places and provide Google Maps links
+- Answer questions about places and your service
+
+When responding to messages:
+1. Be friendly and conversational
+2. If the user seems to be greeting you, respond warmly and explain what you can do
+3. If the user asks a question, answer it helpfully
+4. If the user's intent is unclear, politely ask for clarification
+5. If the message seems like casual conversation, engage briefly but guide them toward your main features
+6. Keep responses concise (1-3 sentences typically)
+7. Use the conversation history to provide context-aware responses
+
+Remember: You help users extract and discover places from social media content."""
+
+CONVERSATION_RESPONSE_WITH_CONTEXT_TEMPLATE = """You are OmniMap, a helpful assistant that helps users discover and manage places from social media content.
+
+Your capabilities:
+- Extract place names and locations from Instagram/TikTok links
+- Search for places and provide Google Maps links
+- Answer questions about places and your service
+
+## Recent Conversation Context
+{conversation_history}
+
+## Guidelines for Responding
+When responding to the current message:
+1. Be friendly and conversational
+2. Use the conversation history to understand context and references
+3. If the user seems to be greeting you, respond warmly and explain what you can do
+4. If the user asks a question, answer it helpfully
+5. If the user's intent is unclear, politely ask for clarification
+6. If the message seems like casual conversation, engage briefly but guide them toward your main features
+7. Keep responses concise (1-3 sentences typically)
+8. If the user refers to something from the conversation history, acknowledge it
+
+Remember: You help users extract and discover places from social media content."""
+
+
+def build_conversation_response_prompt(conversation_history: str) -> str:
+    """
+    Build a system prompt for generating responses to conversation messages.
+
+    Args:
+        conversation_history: Formatted string of recent conversation messages
+
+    Returns:
+        Complete system prompt for conversation response generation
+    """
+    if not conversation_history:
+        return CONVERSATION_RESPONSE_SYSTEM_PROMPT
+
+    return CONVERSATION_RESPONSE_WITH_CONTEXT_TEMPLATE.format(
+        conversation_history=conversation_history
+    )

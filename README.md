@@ -10,6 +10,7 @@ A multi-platform messaging bot built with **Python (FastAPI)** and **Supabase**,
 - 🗄️ **Supabase integration**: Persistent storage and background job processing
 - 🔒 **Secure**: Webhook secret validation and environment variable validation
 - 🌐 **Multi-platform**: Telegram (full), Instagram (ready), TikTok (scaffold)
+- 🧠 **Conversation Memory**: Session-based context (30-min window) for contextual responses
 
 ## 📁 Project Structure
 
@@ -23,8 +24,11 @@ omnimap-agent/
 │   └── tiktok.py          # TikTok adapter (scaffold)
 ├── agents/                # Agentic workflow components
 │   ├── handlers.py        # Content-type specific handlers
-│   ├── orchestrator.py    # Main agent orchestrator
+│   ├── orchestrator.py    # Main agent orchestrator (with memory integration)
 │   └── types.py           # Types & OpenAI function definitions
+├── services/              # Internal services
+│   ├── google_places.py   # Google Places API integration
+│   └── memory.py          # Conversation memory service
 ├── prisma/                # Database schema & migrations
 │   ├── schema.prisma
 │   └── migrations/
@@ -32,7 +36,7 @@ omnimap-agent/
 ├── worker.py              # Unified job processor
 ├── bot_handlers.py        # Telegram command handlers
 ├── settings.py            # Multi-platform configuration
-├── supabase_client.py     # Supabase REST client
+├── supabase_client.py     # Supabase REST client (with memory operations)
 ├── set_webhook.py         # Webhook setup script
 ├── requirements.txt       # Python dependencies
 ├── Dockerfile             # Container build
@@ -252,6 +256,106 @@ Input: https://instagram.com/p/ABC123
 5. Queue jobs: fetch_instagram_content, extract_location_tags, extract_places_from_caption
 6. Return HandlerResult with extracted data
 ```
+
+## 🧠 Conversation Memory
+
+The agent maintains conversation context to provide better, more contextual responses.
+
+### Session-Based Memory (30-Minute Window)
+
+Conversations are grouped into sessions based on activity:
+
+- **Active Session**: If the user sends a message within 30 minutes of their last message, the conversation continues in the same session with full context.
+- **New Session**: After 30+ minutes of inactivity, old memories are archived and a fresh session starts.
+
+```
+User Message
+     │
+     ▼
+┌─────────────────────┐
+│  Session Manager    │  ← Check last_message_at
+└─────────┬───────────┘
+          │
+    ┌─────┴─────┐
+    │           │
+< 30 min    ≥ 30 min
+    │           │
+    ▼           ▼
+Continue    Archive old
+session     memories &
+    │       start fresh
+    │           │
+    └─────┬─────┘
+          ▼
+┌─────────────────────┐
+│  Load Context       │  ← Recent messages for LLM
+└─────────┬───────────┘
+          │
+          ▼
+┌─────────────────────┐
+│  Classify with      │  ← Context-aware classification
+│  Conversation       │
+└─────────────────────┘
+```
+
+### Memory Storage
+
+Conversation memories are stored in the `session_memories` table:
+
+| Field        | Description                         |
+| ------------ | ----------------------------------- |
+| `session_id` | Links to user session               |
+| `role`       | `user` or `assistant`               |
+| `kind`       | Message type (e.g., `message`)      |
+| `content`    | JSON with message text and metadata |
+| `archived`   | `true` when session expires         |
+
+### Context in Classification
+
+When classifying messages, the LLM receives recent conversation history to:
+
+- Understand references to previous messages (e.g., "that place", "the restaurant I mentioned")
+- Maintain context for follow-up questions
+- Provide more accurate classifications based on conversation flow
+
+### Agent Memory Functions (Future)
+
+The agent can use these functions for explicit memory operations:
+
+- **`query_memory`**: Search conversation history for relevant context
+- **`save_to_memory`**: Save important information for long-term recall (preferences, frequently mentioned places)
+
+## 🔮 Future: Long-term Memory (RAG)
+
+The current session-based memory is Phase 1. Future phases will implement semantic memory retrieval:
+
+### Planned Architecture
+
+```
+┌─────────────────────────────────────────────────────┐
+│                   Memory System                      │
+├─────────────────────────────────────────────────────┤
+│  Session Memory (Current)                           │
+│  - 30-minute conversation window                    │
+│  - Recent messages in context                       │
+│  - Archived when session expires                    │
+├─────────────────────────────────────────────────────┤
+│  Long-term Memory (Planned)                         │
+│  - pgvector for semantic embeddings                 │
+│  - OpenAI embeddings for message content            │
+│  - Similarity search for relevant historical context│
+│  - Memory importance scoring                        │
+│  - User preferences persistence                     │
+└─────────────────────────────────────────────────────┘
+```
+
+### RAG Implementation Plan
+
+1. **Vector Storage**: Use Supabase pgvector extension
+2. **Embeddings**: Generate OpenAI embeddings for important messages
+3. **Retrieval**: Semantic search for relevant past conversations
+4. **Scoring**: Rank memories by relevance and importance
+5. **Context Injection**: Include relevant memories in LLM prompts
 
 ## 🧭 Roadmap
 

@@ -58,8 +58,10 @@ model SessionMemory {
   role       String   @db.Text
   kind       String   @db.Text
   content    Json?    @db.JsonB
+  archived   Boolean  @default(false)  // For 30-min session reset - marks old memories
   created_at DateTime @default(now()) @map("created_at")
 
+  @@index([sessionId, archived, created_at], name: "idx_session_memories_active")  // Optimized for active memory queries
   @@index([sessionId, created_at], name: "idx_session_memories_session_created")
   @@map("session_memories")
 }

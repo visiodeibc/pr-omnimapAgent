@@ -8,9 +8,18 @@ processing and will be filled in with actual logic.
 
 from typing import Optional
 
-from agents.types import ContentType, ExtractedData, HandlerResult, UnifiedRequest
+from openai import AsyncOpenAI
+
+from agents.types import (
+    ContentType,
+    ExtractedData,
+    HandlerResult,
+    UnifiedRequest,
+    build_conversation_response_prompt,
+)
 from logging_config import get_logger
 from services.google_places import GooglePlacesService, PlaceSearchQuery
+from services.memory import ConversationContext, MemoryService
 from settings import get_settings
 
 logger = get_logger(__name__)
@@ -169,66 +178,132 @@ async def handle_place_name(
         await service.close()
 
 
-async def handle_question(
+async def handle_conversation(
     request: UnifiedRequest,
     extracted: ExtractedData,
     session_id: Optional[str] = None,
+    conversation_context: Optional[ConversationContext] = None,
+    memory_service: Optional[MemoryService] = None,
 ) -> HandlerResult:
     """
-    Handle messages classified as questions.
+    Handle conversation messages (questions, greetings, general chat).
 
     This handler will:
-    1. Analyze the question intent
-    2. Route to appropriate knowledge source
-    3. Generate a response using conversation context
-    4. Queue response delivery job
+    1. Load conversation context from memory
+    2. Generate a context-aware response using OpenAI
+    3. Return a helpful, conversational response
 
     Args:
         request: The unified incoming request
         extracted: Extracted data from classification
         session_id: Optional session ID for context
+        conversation_context: Optional conversation context from memory
+        memory_service: Optional memory service for building context strings
 
     Returns:
         HandlerResult with processing outcome
     """
     logger.info(
-        "❓ [QUESTION] Processing question request",
+        "💬 [CONVERSATION] Processing conversation message",
         extra={
             "platform": request.platform,
             "user_id": request.platform_user_id,
-            "question_text": extracted.question_text,
-            "topic": extracted.question_topic,
-            "intent": extracted.question_intent,
+            "message_text": extracted.message_text,
+            "topic": extracted.message_topic,
+            "intent": extracted.message_intent,
             "confidence": extracted.confidence,
             "session_id": session_id,
+            "has_context": conversation_context.has_context() if conversation_context else False,
         },
     )
 
-    # TODO: Implement actual question handling
-    # 1. Retrieve session context/memory
-    # 2. Determine if question is about a place, usage, or general
-    # 3. Query relevant knowledge sources
-    # 4. Generate response with LLM
-    # 5. Queue response delivery
+    # Get settings to check if OpenAI is available
+    settings = get_settings()
+    if not settings.agent_enabled:
+        logger.warning("OpenAI not configured, returning default response")
+        return HandlerResult(
+            success=True,
+            handler_name="handle_conversation",
+            content_type=ContentType.CONVERSATION,
+            data={
+                "message_text": extracted.message_text,
+                "topic": extracted.message_topic,
+                "intent": extracted.message_intent,
+                "status": "openai_not_configured",
+            },
+            message="Hi! I'm OmniMap. I can help you discover places from Instagram and TikTok links, or search for specific locations. Send me a link or a place name to get started!",
+            follow_up_actions=["await_user_input"],
+        )
 
-    logger.debug(
-        "Question handler completed (stub implementation)",
-        extra={"question_topic": extracted.question_topic},
-    )
+    # Build conversation context string for the prompt
+    context_string = ""
+    if conversation_context and memory_service and conversation_context.has_context():
+        context_string = memory_service.build_prompt_context(conversation_context)
+        logger.debug(
+            "Built conversation context for response",
+            extra={"context_message_count": conversation_context.message_count},
+        )
 
-    return HandlerResult(
-        success=True,
-        handler_name="handle_question",
-        content_type=ContentType.QUESTION,
-        data={
-            "question_text": extracted.question_text,
-            "topic": extracted.question_topic,
-            "intent": extracted.question_intent,
-            "status": "pending_implementation",
-        },
-        message="Question received. Response generation will be implemented.",
-        follow_up_actions=["retrieve_context", "generate_response", "deliver_response"],
-    )
+    # Build the system prompt with or without context
+    system_prompt = build_conversation_response_prompt(context_string)
+
+    # Generate contextual response using OpenAI
+    try:
+        openai_client = AsyncOpenAI(api_key=settings.openai.api_key)
+        response = await openai_client.chat.completions.create(
+            model=settings.openai.model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": request.raw_content or ""},
+            ],
+            max_tokens=256,
+            temperature=0.7,
+        )
+
+        ai_response = response.choices[0].message.content or ""
+
+        logger.info(
+            "Generated contextual response for conversation",
+            extra={
+                "response_preview": ai_response[:100] if ai_response else None,
+                "had_context": bool(context_string),
+                "topic": extracted.message_topic,
+            },
+        )
+
+        return HandlerResult(
+            success=True,
+            handler_name="handle_conversation",
+            content_type=ContentType.CONVERSATION,
+            data={
+                "message_text": extracted.message_text,
+                "topic": extracted.message_topic,
+                "intent": extracted.message_intent,
+                "status": "responded",
+                "had_conversation_context": bool(context_string),
+            },
+            message=ai_response,
+            follow_up_actions=["continue_conversation"],
+        )
+
+    except Exception as e:
+        logger.error(
+            "Failed to generate contextual response",
+            extra={"error": str(e)},
+        )
+        return HandlerResult(
+            success=True,
+            handler_name="handle_conversation",
+            content_type=ContentType.CONVERSATION,
+            data={
+                "message_text": extracted.message_text,
+                "topic": extracted.message_topic,
+                "intent": extracted.message_intent,
+                "status": "fallback_response",
+            },
+            message="Hi! I'm OmniMap. I can help you discover places from Instagram and TikTok links, or search for specific locations. Send me a link or a place name to get started!",
+            follow_up_actions=["await_user_input"],
+        )
 
 
 async def handle_instagram_link(
@@ -425,70 +500,13 @@ async def handle_other_link(
     )
 
 
-async def handle_unknown(
-    request: UnifiedRequest,
-    extracted: ExtractedData,
-    session_id: Optional[str] = None,
-) -> HandlerResult:
-    """
-    Handle messages that could not be classified.
-
-    This handler will:
-    1. Log the unclassified message for analysis
-    2. Attempt fallback classification
-    3. Generate a clarifying response to the user
-    4. Update training data for improvement
-
-    Args:
-        request: The unified incoming request
-        extracted: Extracted data from classification
-        session_id: Optional session ID for context
-
-    Returns:
-        HandlerResult with processing outcome
-    """
-    logger.warning(
-        "❔ [UNKNOWN] Could not classify message",
-        extra={
-            "platform": request.platform,
-            "user_id": request.platform_user_id,
-            "raw_content": request.raw_content[:200] if request.raw_content else None,
-            "reason": extracted.extra.get("reason"),
-            "possible_types": extracted.extra.get("possible_types"),
-            "session_id": session_id,
-        },
-    )
-
-    # TODO: Implement unknown message handling
-    # 1. Log for analysis and model improvement
-    # 2. Send clarifying response to user
-    # 3. Store for manual review
-
-    logger.debug("Unknown handler completed (stub implementation)")
-
-    return HandlerResult(
-        success=True,
-        handler_name="handle_unknown",
-        content_type=ContentType.UNKNOWN,
-        data={
-            "raw_content_preview": request.raw_content[:100] if request.raw_content else None,
-            "reason": extracted.extra.get("reason"),
-            "possible_types": extracted.extra.get("possible_types"),
-            "status": "needs_clarification",
-        },
-        message="Could not understand your message. Please try rephrasing or provide more context.",
-        follow_up_actions=["request_clarification", "log_for_review"],
-    )
-
-
 # Handler registry for dynamic dispatch
 HANDLER_REGISTRY = {
     ContentType.PLACE_NAME: handle_place_name,
-    ContentType.QUESTION: handle_question,
+    ContentType.CONVERSATION: handle_conversation,
     ContentType.INSTAGRAM_LINK: handle_instagram_link,
     ContentType.TIKTOK_LINK: handle_tiktok_link,
     ContentType.OTHER_LINK: handle_other_link,
-    ContentType.UNKNOWN: handle_unknown,
 }
 
 
@@ -497,6 +515,8 @@ async def dispatch_handler(
     request: UnifiedRequest,
     extracted: ExtractedData,
     session_id: Optional[str] = None,
+    conversation_context: Optional[ConversationContext] = None,
+    memory_service: Optional[MemoryService] = None,
 ) -> HandlerResult:
     """
     Dispatch to the appropriate handler based on content type.
@@ -506,6 +526,8 @@ async def dispatch_handler(
         request: The unified incoming request
         extracted: Extracted data from classification
         session_id: Optional session ID for context
+        conversation_context: Optional conversation context for handlers that need it
+        memory_service: Optional memory service for context building
 
     Returns:
         HandlerResult from the appropriate handler
@@ -522,6 +544,16 @@ async def dispatch_handler(
             content_type=content_type,
             error=f"No handler for content type: {content_type.value}",
             error_code="NO_HANDLER",
+        )
+
+    # Pass additional context to handlers that support it
+    if content_type == ContentType.CONVERSATION:
+        return await handler(
+            request,
+            extracted,
+            session_id,
+            conversation_context=conversation_context,
+            memory_service=memory_service,
         )
 
     return await handler(request, extracted, session_id)

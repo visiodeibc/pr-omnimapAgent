@@ -1,5 +1,5 @@
 """
-Services module for external API integrations.
+Services module for external API integrations and internal services.
 """
 
 from services.google_places import (
@@ -7,9 +7,15 @@ from services.google_places import (
     PlaceSearchQuery,
     PlaceSearchResult,
 )
+from services.memory import (
+    ConversationContext,
+    MemoryService,
+)
 
 __all__ = [
     "GooglePlacesService",
     "PlaceSearchQuery",
     "PlaceSearchResult",
+    "ConversationContext",
+    "MemoryService",
 ]
