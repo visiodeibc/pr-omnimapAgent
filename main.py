@@ -10,6 +10,7 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from telegram import Update
 from telegram.ext import (
     Application,
+    CallbackQueryHandler,
     CommandHandler,
     ContextTypes,
     MessageHandler,
@@ -22,7 +23,7 @@ from adapters.registry import AdapterRegistry, get_adapter_registry
 from adapters.telegram import TelegramAdapter
 from adapters.tiktok import TikTokAdapter
 from agents.orchestrator import AgentOrchestrator
-from bot_handlers import hello_command, help_command, start_command
+from bot_handlers import callback_query_handler, hello_command, help_command, start_command
 from debug_reporter import create_debug_reporter
 from logging_config import get_logger, setup_logging
 from settings import get_settings
@@ -109,6 +110,10 @@ async def startup() -> None:
     _bot_application.add_handler(CommandHandler("help", help_command))
     _bot_application.add_handler(CommandHandler("hello", hello_command))
 
+    # Register callback query handler for inline keyboard buttons (onboarding navigation)
+    _bot_application.add_handler(CallbackQueryHandler(callback_query_handler))
+    logger.info("Registered callback query handler for onboarding buttons")
+
     # Register message handler for non-command text messages (routes to agent)
     # This handles regular text messages through the agentic pipeline
     _bot_application.add_handler(
@@ -191,15 +196,18 @@ async def _handle_telegram_message(
     Handle incoming Telegram text messages through the agent orchestrator.
 
     This handler processes non-command messages using the agentic pipeline:
-    1. Parse message using TelegramAdapter
-    2. Classify content with OpenAI
-    3. Route to appropriate handler
-    4. Optionally send response back to user
+    1. Check if user is new and needs onboarding welcome
+    2. Parse message using TelegramAdapter
+    3. Classify content with OpenAI
+    4. Route to appropriate handler
+    5. Optionally send response back to user
 
     Args:
         update: Telegram Update object
         context: Telegram context
     """
+    from onboarding import CONDENSED_WELCOME
+
     if not update.message or not update.message.text:
         return
 
@@ -228,6 +236,35 @@ async def _handle_telegram_message(
         },
     )
 
+    # Check if this is a new user who hasn't seen onboarding
+    supabase_client: SupabaseRestClient = context.bot_data.get("supabase_client")
+    should_show_welcome = False
+    
+    if supabase_client:
+        try:
+            # Check for existing session and onboarding status
+            session, is_new_session = supabase_client.get_or_create_active_session(
+                platform="telegram",
+                platform_user_id=incoming.user.platform_user_id,
+                platform_chat_id=int(incoming.chat.platform_chat_id) if incoming.chat.platform_chat_id else None,
+                metadata={
+                    "username": incoming.user.username,
+                    "display_name": incoming.user.display_name,
+                },
+            )
+            
+            # Show welcome if this is a brand new user who hasn't seen onboarding
+            if is_new_session and not supabase_client.has_seen_onboarding(session["id"]):
+                should_show_welcome = True
+                # Mark that we're showing the condensed onboarding
+                supabase_client.mark_onboarding_shown(session["id"])
+                logger.info(
+                    "New user detected, will show condensed welcome",
+                    extra={"user_id": incoming.user.platform_user_id},
+                )
+        except Exception as exc:
+            logger.warning("Failed to check onboarding status: %s", exc)
+
     # Create debug reporter for development mode
     debug_reporter = create_debug_reporter(
         chat_id=incoming.chat.platform_chat_id,
@@ -244,6 +281,10 @@ async def _handle_telegram_message(
                 "text": (incoming.text or "")[:100],
             },
         )
+
+    # Send condensed welcome to new users first
+    if should_show_welcome:
+        await update.message.reply_text(CONDENSED_WELCOME, parse_mode="HTML")
 
     # Process through agent orchestrator if available
     if _agent_orchestrator:

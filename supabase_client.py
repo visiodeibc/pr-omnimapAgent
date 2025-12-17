@@ -345,6 +345,47 @@ class SupabaseRestClient:
             return None
         return data[0]
 
+    def has_seen_onboarding(self, session_id: str) -> bool:
+        """
+        Check if a user has seen the onboarding message.
+        
+        Args:
+            session_id: The session UUID
+            
+        Returns:
+            True if onboarding_shown_at is set in session metadata
+        """
+        session = self.get_session(session_id)
+        if not session:
+            return False
+        
+        metadata = session.get("metadata") or {}
+        return "onboarding_shown_at" in metadata
+
+    def mark_onboarding_shown(self, session_id: str) -> None:
+        """
+        Mark that onboarding has been shown to the user.
+        
+        Args:
+            session_id: The session UUID
+        """
+        # First get existing metadata
+        session = self.get_session(session_id)
+        if not session:
+            return
+        
+        existing_metadata = session.get("metadata") or {}
+        existing_metadata["onboarding_shown_at"] = _now_iso()
+        
+        params = {"id": f"eq.{session_id}"}
+        payload = {"metadata": existing_metadata, "updated_at": _now_iso()}
+        resp = self._client.patch(
+            "/sessions",
+            params=params,
+            json=payload,
+        )
+        resp.raise_for_status()
+
     def fetch_pending_requests(
         self, limit: int = 10
     ) -> List[Dict[str, Any]]:

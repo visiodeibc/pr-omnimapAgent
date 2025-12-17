@@ -256,7 +256,7 @@ async def handle_conversation(
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": request.raw_content or ""},
             ],
-            max_tokens=256,
+            max_tokens=1024,
             temperature=0.7,
         )
 

@@ -4,6 +4,15 @@ from telegram import Update
 from telegram.ext import ContextTypes
 
 from logging_config import get_logger
+from onboarding import (
+    CALLBACK_MESSAGES,
+    CONDENSED_WELCOME,
+    HELP_MESSAGE,
+    WELCOME_MESSAGE,
+    get_callback_keyboard,
+    get_help_keyboard,
+    get_welcome_keyboard,
+)
 
 if TYPE_CHECKING:
     from supabase_client import SupabaseRestClient
@@ -12,22 +21,104 @@ logger = get_logger(__name__)
 
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle the /start command."""
+    """
+    Handle the /start command with comprehensive onboarding.
+    
+    Shows welcome message with feature overview and interactive buttons.
+    Also tracks that the user has seen onboarding in session metadata.
+    """
+    user = update.effective_user
+    chat = update.effective_chat
+    
+    logger.info(
+        "Start command received",
+        extra={
+            "user_id": user.id if user else None,
+            "username": user.username if user else None,
+            "chat_id": chat.id if chat else None,
+        },
+    )
+    
+    # Track onboarding in session metadata
+    supabase_client: "SupabaseRestClient" = context.bot_data.get("supabase_client")
+    if supabase_client and user and chat:
+        try:
+            import datetime as dt
+            supabase_client.ensure_session(
+                platform="telegram",
+                platform_user_id=str(user.id),
+                platform_chat_id=chat.id,
+                metadata={
+                    "username": user.username,
+                    "first_name": user.first_name,
+                    "last_name": user.last_name,
+                    "language_code": user.language_code,
+                    "onboarding_shown_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+                },
+            )
+        except Exception as exc:
+            logger.warning("Failed to track onboarding in session: %s", exc)
+    
     await update.message.reply_text(
-        "🗺️ OmniMap Agent\n\n"
-        "Extract places from content and turn them into useful map links.\n"
-        "Send a message or /help to see options.",
+        WELCOME_MESSAGE,
+        parse_mode="HTML",
+        reply_markup=get_welcome_keyboard(),
     )
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle the /help command."""
+    """
+    Handle the /help command with detailed feature documentation.
+    """
     await update.message.reply_text(
-        "📚 Available commands:\n\n"
-        "/start - Get started with the bot\n"
-        "/help - Show this help message\n"
-        "/hello - Trigger the Python worker hello-world demo"
+        HELP_MESSAGE,
+        parse_mode="HTML",
+        reply_markup=get_help_keyboard(),
     )
+
+
+async def callback_query_handler(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> None:
+    """
+    Handle inline keyboard button callbacks for onboarding navigation.
+    
+    Responds to button presses from welcome/help messages to show
+    feature details or navigate back.
+    """
+    query = update.callback_query
+    if not query:
+        return
+    
+    await query.answer()  # Acknowledge the callback
+    
+    callback_data = query.data
+    if not callback_data:
+        return
+    
+    logger.debug(
+        "Callback query received",
+        extra={"callback_data": callback_data, "user_id": query.from_user.id},
+    )
+    
+    # Get the message and keyboard for this callback
+    message_text = CALLBACK_MESSAGES.get(callback_data)
+    if not message_text:
+        logger.warning("Unknown callback data: %s", callback_data)
+        return
+    
+    keyboard = get_callback_keyboard(callback_data)
+    
+    # Edit the existing message with new content
+    try:
+        await query.edit_message_text(
+            text=message_text,
+            parse_mode="HTML",
+            reply_markup=keyboard,
+        )
+    except Exception as exc:
+        # Message might be unchanged, which raises an error
+        logger.debug("Could not edit message: %s", exc)
 
 
 async def hello_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
