@@ -7,6 +7,7 @@ Google Places API (New). It supports both single and batch queries.
 
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
+from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 import httpx
 
@@ -264,8 +265,9 @@ class GooglePlacesService:
             # Get address
             formatted_address = place_data.get("formattedAddress", "")
 
-            # Get Google Maps URL
+            # Get Google Maps URL and remove tracking parameters
             google_maps_url = place_data.get("googleMapsUri", "")
+            google_maps_url = self._clean_maps_url(google_maps_url)
 
             # Get rating info
             rating = place_data.get("rating")
@@ -293,3 +295,40 @@ class GooglePlacesService:
                 extra={"error": str(e), "place_data_keys": list(place_data.keys())},
             )
             return None
+
+    def _clean_maps_url(self, url: str) -> str:
+        """
+        Remove tracking parameters from Google Maps URL.
+
+        Args:
+            url: The original Google Maps URL
+
+        Returns:
+            Cleaned URL without tracking parameters like g_mp
+        """
+        if not url:
+            return url
+
+        try:
+            parsed = urlparse(url)
+            query_params = parse_qs(parsed.query)
+
+            # Remove tracking parameters
+            params_to_remove = ["g_mp", "g_st"]
+            for param in params_to_remove:
+                query_params.pop(param, None)
+
+            # Rebuild the URL
+            clean_query = urlencode(query_params, doseq=True)
+            clean_url = urlunparse((
+                parsed.scheme,
+                parsed.netloc,
+                parsed.path,
+                parsed.params,
+                clean_query,
+                parsed.fragment,
+            ))
+            return clean_url
+        except Exception:
+            # If parsing fails, return original URL
+            return url
