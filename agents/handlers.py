@@ -10,6 +10,8 @@ from typing import Optional
 
 from agents.types import ContentType, ExtractedData, HandlerResult, UnifiedRequest
 from logging_config import get_logger
+from services.google_places import GooglePlacesService, PlaceSearchQuery
+from settings import get_settings
 
 logger = get_logger(__name__)
 
@@ -23,10 +25,9 @@ async def handle_place_name(
     Handle messages classified as containing a place name.
 
     This handler will:
-    1. Search for the place in external APIs (Google Maps, OSM, etc.)
-    2. Validate and enrich the place information
-    3. Store the place candidate for user review
-    4. Queue follow-up jobs for enrichment
+    1. Search for the place in Google Places API
+    2. Return place details with Google Maps links
+    3. Queue follow-up jobs for enrichment (future)
 
     Args:
         request: The unified incoming request
@@ -48,30 +49,123 @@ async def handle_place_name(
         },
     )
 
-    # TODO: Implement actual place processing
-    # 1. Search Google Places API for the place
-    # 2. Search OpenStreetMap for the place
-    # 3. Merge and deduplicate results
-    # 4. Store candidates in database
-    # 5. Queue enrichment jobs
+    # Check if Google Places API is configured
+    settings = get_settings()
+    if not settings.google_places_enabled:
+        logger.warning(
+            "Google Places API not configured, returning stub response",
+            extra={"place_name": extracted.place_name},
+        )
+        return HandlerResult(
+            success=False,
+            handler_name="handle_place_name",
+            content_type=ContentType.PLACE_NAME,
+            data={
+                "place_name": extracted.place_name,
+                "location_hints": extracted.location_hints,
+                "status": "not_configured",
+            },
+            error="Google Places API key not configured",
+            error_code="GOOGLE_PLACES_NOT_CONFIGURED",
+            message="Place search is not available. Please configure GOOGLE_MAPS_API_KEY.",
+        )
 
-    logger.debug(
-        "Place name handler completed (stub implementation)",
-        extra={"place_name": extracted.place_name},
+    # Build search query with location hints
+    location_hint = None
+    if extracted.location_hints:
+        location_hint = ", ".join(extracted.location_hints)
+
+    query = PlaceSearchQuery(
+        query=extracted.place_name or "",
+        location_hint=location_hint,
     )
 
-    return HandlerResult(
-        success=True,
-        handler_name="handle_place_name",
-        content_type=ContentType.PLACE_NAME,
-        data={
-            "place_name": extracted.place_name,
-            "location_hints": extracted.location_hints,
-            "status": "pending_implementation",
-        },
-        message=f"Received place name: {extracted.place_name}. Processing will be implemented.",
-        follow_up_actions=["search_google_places", "search_osm", "enrich_place_data"],
-    )
+    # Search Google Places
+    service = GooglePlacesService(api_key=settings.google_places.api_key)
+    try:
+        results = await service.search_place(query)
+
+        if not results:
+            logger.info(
+                "No places found for query",
+                extra={"place_name": extracted.place_name},
+            )
+            return HandlerResult(
+                success=True,
+                handler_name="handle_place_name",
+                content_type=ContentType.PLACE_NAME,
+                data={
+                    "place_name": extracted.place_name,
+                    "location_hints": extracted.location_hints,
+                    "search_results": [],
+                    "status": "not_found",
+                },
+                message=f"No places found for '{extracted.place_name}'.",
+                follow_up_actions=["search_osm"],
+            )
+
+        # Convert results to serializable format
+        search_results = [result.to_dict() for result in results]
+
+        logger.info(
+            "Place search completed successfully",
+            extra={
+                "place_name": extracted.place_name,
+                "results_count": len(search_results),
+            },
+        )
+
+        # Build response message with top result (HTML formatting for Telegram)
+        top_result = results[0]
+        message = (
+            f"Found {len(results)} result(s) for '{extracted.place_name}'.\n\n"
+            f"<b>{top_result.name}</b>\n"
+            f"📍 {top_result.formatted_address}\n"
+        )
+        if top_result.rating:
+            message += f"⭐ {top_result.rating}"
+            if top_result.user_ratings_total:
+                message += f" ({top_result.user_ratings_total} reviews)"
+            message += "\n"
+        message += f"🔗 {top_result.google_maps_url}"
+
+        return HandlerResult(
+            success=True,
+            handler_name="handle_place_name",
+            content_type=ContentType.PLACE_NAME,
+            data={
+                "place_name": extracted.place_name,
+                "location_hints": extracted.location_hints,
+                "search_results": search_results,
+                "status": "found",
+            },
+            message=message,
+            follow_up_actions=["enrich_place_data", "store_candidate"],
+        )
+
+    except Exception as e:
+        logger.error(
+            "Google Places search failed",
+            extra={
+                "place_name": extracted.place_name,
+                "error": str(e),
+            },
+        )
+        return HandlerResult(
+            success=False,
+            handler_name="handle_place_name",
+            content_type=ContentType.PLACE_NAME,
+            data={
+                "place_name": extracted.place_name,
+                "location_hints": extracted.location_hints,
+                "status": "error",
+            },
+            error=str(e),
+            error_code="GOOGLE_PLACES_ERROR",
+            message=f"Failed to search for '{extracted.place_name}'. Please try again later.",
+        )
+    finally:
+        await service.close()
 
 
 async def handle_question(

@@ -267,8 +267,9 @@ async def _handle_telegram_message(
                 await debug_reporter.flush()
 
             # Send response to user if handler provided a message
+            # Use HTML parse_mode to support formatting like <b>bold</b>
             if result.message:
-                await update.message.reply_text(result.message)
+                await update.message.reply_text(result.message, parse_mode="HTML")
 
         except Exception as exc:
             logger.exception("Error processing message through agent: %s", exc)

@@ -33,6 +33,13 @@ class TikTokSettings:
 
 
 @dataclass(frozen=True)
+class GooglePlacesSettings:
+    """Google Places API settings for place search."""
+
+    api_key: str
+
+
+@dataclass(frozen=True)
 class OpenAISettings:
     """OpenAI API settings for agentic workflow."""
 
@@ -62,6 +69,9 @@ class Settings:
     instagram: Optional[InstagramSettings] = None
     tiktok: Optional[TikTokSettings] = None
 
+    # External API settings
+    google_places: Optional[GooglePlacesSettings] = None
+
     @property
     def enabled_platforms(self) -> list[str]:
         """List of configured platforms."""
@@ -83,6 +93,11 @@ class Settings:
     def agent_enabled(self) -> bool:
         """Check if agentic workflow is enabled (requires OpenAI)."""
         return self.openai is not None
+
+    @property
+    def google_places_enabled(self) -> bool:
+        """Check if Google Places API is configured."""
+        return self.google_places is not None
 
 
 @lru_cache(maxsize=1)
@@ -152,6 +167,14 @@ def get_settings() -> Settings:
             model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
         )
 
+    # Load Google Places settings (optional, enables place search)
+    google_places_settings = None
+    google_places_api_key = os.getenv("GOOGLE_MAPS_API_KEY")
+    if google_places_api_key:
+        google_places_settings = GooglePlacesSettings(
+            api_key=google_places_api_key,
+        )
+
     return Settings(
         supabase_url=url,
         supabase_key=key,
@@ -163,6 +186,7 @@ def get_settings() -> Settings:
         telegram=telegram_settings,
         instagram=instagram_settings,
         tiktok=tiktok_settings,
+        google_places=google_places_settings,
     )
 
 
