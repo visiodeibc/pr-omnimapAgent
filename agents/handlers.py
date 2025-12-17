@@ -115,19 +115,20 @@ async def handle_place_name(
             },
         )
 
-        # Build response message with top result (HTML formatting for Telegram)
-        top_result = results[0]
-        message = (
-            f"Found {len(results)} result(s) for '{extracted.place_name}'.\n\n"
-            f"<b>{top_result.name}</b>\n"
-            f"📍 {top_result.formatted_address}\n"
-        )
-        if top_result.rating:
-            message += f"⭐ {top_result.rating}"
-            if top_result.user_ratings_total:
-                message += f" ({top_result.user_ratings_total} reviews)"
-            message += "\n"
-        message += f"🔗 {top_result.google_maps_url}"
+        # Build response message with results (HTML formatting for Telegram)
+        # Show up to 5 results
+        results_to_show = results[:5]
+        message = f"Found {len(results)} result(s) for '{extracted.place_name}'.\n"
+
+        for i, result in enumerate(results_to_show, start=1):
+            message += f"\n<b>{i}. {result.name}</b>\n"
+            message += f"📍 {result.formatted_address}\n"
+            if result.rating:
+                message += f"⭐ {result.rating}"
+                if result.user_ratings_total:
+                    message += f" ({result.user_ratings_total} reviews)"
+                message += "\n"
+            message += f"🔗 {result.google_maps_url}\n"
 
         return HandlerResult(
             success=True,
