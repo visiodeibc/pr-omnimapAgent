@@ -168,6 +168,9 @@ class SupabaseRestClient:
         platform_chat_id: Optional[int] = None,
         inactivity_threshold_minutes: int = 30,
         metadata: Optional[Dict[str, Any]] = None,
+        platform_username: Optional[str] = None,
+        display_name: Optional[str] = None,
+        platform_metadata: Optional[Dict[str, Any]] = None,
     ) -> Tuple[Dict[str, Any], bool]:
         """
         Get an active session or create a new one.
@@ -175,12 +178,18 @@ class SupabaseRestClient:
         If the existing session has been inactive for longer than the threshold,
         archives old memories and resets the session context.
 
+        Also ensures a User and PlatformAccount exist for this platform identity,
+        linking the session to the unified user.
+
         Args:
             platform: Platform identifier (telegram, instagram, etc.)
             platform_user_id: User ID on the platform
             platform_chat_id: Optional chat ID
             inactivity_threshold_minutes: Minutes of inactivity before session expires (default 30)
             metadata: Optional metadata to store with session
+            platform_username: Optional username on the platform (for user linking)
+            display_name: Optional display name for the user (for user linking)
+            platform_metadata: Optional platform-specific metadata (for user linking)
 
         Returns:
             Tuple of (session_dict, is_new_session)
@@ -189,7 +198,17 @@ class SupabaseRestClient:
         now = dt.datetime.now(dt.timezone.utc)
         now_iso = now.isoformat()
 
-        # First, try to get existing session
+        # First, ensure User and PlatformAccount exist
+        user, _platform_account, _is_new_user = self.get_or_create_user_for_platform(
+            platform=platform,
+            platform_user_id=platform_user_id,
+            platform_username=platform_username,
+            display_name=display_name,
+            platform_metadata=platform_metadata,
+        )
+        user_id = user["id"]
+
+        # Try to get existing session
         params = {
             "platform": f"eq.{platform}",
             "platform_user_id": f"eq.{platform_user_id}",
@@ -215,10 +234,11 @@ class SupabaseRestClient:
                     self.archive_session_memories(session["id"])
                     is_new_session = True
 
-            # Update last_message_at
+            # Update last_message_at and ensure user_id is linked
             update_payload: Dict[str, Any] = {
                 "last_message_at": now_iso,
                 "updated_at": now_iso,
+                "user_id": user_id,  # Ensure session is linked to user
             }
             if platform_chat_id is not None:
                 update_payload["platform_chat_id"] = platform_chat_id
@@ -236,11 +256,12 @@ class SupabaseRestClient:
             updated_data: List[Dict[str, Any]] = update_resp.json()
             return (updated_data[0] if updated_data else session, is_new_session)
 
-        # No existing session - create new one
+        # No existing session - create new one with user_id
         create_payload: Dict[str, Any] = {
             "platform": platform,
             "platform_user_id": platform_user_id,
             "platform_chat_id": platform_chat_id,
+            "user_id": user_id,  # Link to unified user
             "last_message_at": now_iso,
             "created_at": now_iso,
             "updated_at": now_iso,
@@ -276,13 +297,44 @@ class SupabaseRestClient:
         platform_user_id: str,
         platform_chat_id: Optional[int] = None,
         metadata: Optional[Dict[str, Any]] = None,
+        platform_username: Optional[str] = None,
+        display_name: Optional[str] = None,
+        platform_metadata: Optional[Dict[str, Any]] = None,
     ) -> Optional[Dict[str, Any]]:
-        """Ensure a session exists for a given platform user (upsert)."""
+        """
+        Ensure a session exists for a given platform user (upsert).
+
+        Also ensures a User and PlatformAccount exist for this platform identity,
+        linking the session to the unified user.
+
+        Args:
+            platform: Platform identifier (telegram, instagram, etc.)
+            platform_user_id: User ID on the platform
+            platform_chat_id: Optional chat ID
+            metadata: Optional metadata to store with session
+            platform_username: Optional username on the platform (for user linking)
+            display_name: Optional display name for the user (for user linking)
+            platform_metadata: Optional platform-specific metadata (for user linking)
+
+        Returns:
+            The session record, or None if failed
+        """
+        # First, ensure User and PlatformAccount exist
+        user, _platform_account, _is_new_user = self.get_or_create_user_for_platform(
+            platform=platform,
+            platform_user_id=platform_user_id,
+            platform_username=platform_username,
+            display_name=display_name,
+            platform_metadata=platform_metadata,
+        )
+        user_id = user["id"]
+
         now = _now_iso()
-        payload = {
+        payload: Dict[str, Any] = {
             "platform": platform,
             "platform_user_id": platform_user_id,
             "platform_chat_id": platform_chat_id,
+            "user_id": user_id,  # Link to unified user
             "last_message_at": now,
             "updated_at": now,
         }
@@ -398,3 +450,269 @@ class SupabaseRestClient:
         resp = self._client.get("/incoming_requests", params=params)
         resp.raise_for_status()
         return resp.json()
+
+    # =========================================================================
+    # User Operations
+    # =========================================================================
+
+    def get_user(self, user_id: str) -> Optional[Dict[str, Any]]:
+        """Fetch a user by ID."""
+        params = {
+            "id": f"eq.{user_id}",
+            "limit": "1",
+        }
+        resp = self._client.get("/users", params=params)
+        resp.raise_for_status()
+        data: List[Dict[str, Any]] = resp.json()
+        if not data:
+            return None
+        return data[0]
+
+    def create_user(
+        self,
+        display_name: Optional[str] = None,
+        email: Optional[str] = None,
+        settings: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Create a new user.
+
+        Args:
+            display_name: Optional display name
+            email: Optional email (for future auth)
+            settings: Optional user settings
+
+        Returns:
+            The created user record
+        """
+        now = _now_iso()
+        payload: Dict[str, Any] = {
+            "created_at": now,
+            "updated_at": now,
+        }
+        if display_name:
+            payload["display_name"] = display_name
+        if email:
+            payload["email"] = email
+        if settings:
+            payload["settings"] = settings
+
+        resp = self._client.post(
+            "/users",
+            json=payload,
+            headers={"Prefer": "return=representation"},
+        )
+        resp.raise_for_status()
+        data: List[Dict[str, Any]] = resp.json()
+        return data[0] if data else {}
+
+    def update_user(self, user_id: str, payload: Dict[str, Any]) -> None:
+        """Update a user record."""
+        params = {"id": f"eq.{user_id}"}
+        payload = {**payload, "updated_at": _now_iso()}
+        resp = self._client.patch(
+            "/users",
+            params=params,
+            json=payload,
+        )
+        resp.raise_for_status()
+
+    # =========================================================================
+    # Platform Account Operations
+    # =========================================================================
+
+    def get_platform_account(
+        self,
+        platform: str,
+        platform_user_id: str,
+    ) -> Optional[Dict[str, Any]]:
+        """
+        Get a platform account by platform identity.
+
+        Args:
+            platform: Platform identifier (telegram, instagram, etc.)
+            platform_user_id: User ID on the platform
+
+        Returns:
+            The platform account record, or None if not found
+        """
+        params = {
+            "platform": f"eq.{platform}",
+            "platform_user_id": f"eq.{platform_user_id}",
+            "limit": "1",
+        }
+        resp = self._client.get("/platform_accounts", params=params)
+        resp.raise_for_status()
+        data: List[Dict[str, Any]] = resp.json()
+        if not data:
+            return None
+        return data[0]
+
+    def get_platform_account_by_id(
+        self, account_id: str
+    ) -> Optional[Dict[str, Any]]:
+        """Fetch a platform account by ID."""
+        params = {
+            "id": f"eq.{account_id}",
+            "limit": "1",
+        }
+        resp = self._client.get("/platform_accounts", params=params)
+        resp.raise_for_status()
+        data: List[Dict[str, Any]] = resp.json()
+        if not data:
+            return None
+        return data[0]
+
+    def create_platform_account(
+        self,
+        user_id: str,
+        platform: str,
+        platform_user_id: str,
+        platform_username: Optional[str] = None,
+        platform_metadata: Optional[Dict[str, Any]] = None,
+        is_primary: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        Create a new platform account linked to a user.
+
+        Args:
+            user_id: The user UUID to link to
+            platform: Platform identifier (telegram, instagram, etc.)
+            platform_user_id: User ID on the platform
+            platform_username: Optional username on the platform
+            platform_metadata: Optional platform-specific metadata
+            is_primary: Whether this is the primary account for the user
+
+        Returns:
+            The created platform account record
+        """
+        now = _now_iso()
+        payload: Dict[str, Any] = {
+            "user_id": user_id,
+            "platform": platform,
+            "platform_user_id": platform_user_id,
+            "is_primary": is_primary,
+            "is_verified": False,
+            "linked_at": now,
+            "created_at": now,
+            "updated_at": now,
+        }
+        if platform_username:
+            payload["platform_username"] = platform_username
+        if platform_metadata:
+            payload["platform_metadata"] = platform_metadata
+
+        resp = self._client.post(
+            "/platform_accounts",
+            json=payload,
+            headers={"Prefer": "return=representation"},
+        )
+        resp.raise_for_status()
+        data: List[Dict[str, Any]] = resp.json()
+        return data[0] if data else {}
+
+    def get_user_platform_accounts(
+        self, user_id: str
+    ) -> List[Dict[str, Any]]:
+        """
+        Get all platform accounts for a user.
+
+        Args:
+            user_id: The user UUID
+
+        Returns:
+            List of platform account records
+        """
+        params = {
+            "user_id": f"eq.{user_id}",
+            "order": "created_at.asc",
+        }
+        resp = self._client.get("/platform_accounts", params=params)
+        resp.raise_for_status()
+        return resp.json()
+
+    def update_platform_account(
+        self, account_id: str, payload: Dict[str, Any]
+    ) -> None:
+        """Update a platform account record."""
+        params = {"id": f"eq.{account_id}"}
+        payload = {**payload, "updated_at": _now_iso()}
+        resp = self._client.patch(
+            "/platform_accounts",
+            params=params,
+            json=payload,
+        )
+        resp.raise_for_status()
+
+    # =========================================================================
+    # User + Platform Account Combined Operations (for account linking)
+    # =========================================================================
+
+    def get_or_create_user_for_platform(
+        self,
+        platform: str,
+        platform_user_id: str,
+        platform_username: Optional[str] = None,
+        display_name: Optional[str] = None,
+        platform_metadata: Optional[Dict[str, Any]] = None,
+    ) -> Tuple[Dict[str, Any], Dict[str, Any], bool]:
+        """
+        Get or create a User and PlatformAccount for a platform identity.
+
+        This is the main entry point for Telegram (and other platform) account linking.
+        When a user first interacts via a platform, this creates both the unified
+        User record and the PlatformAccount linking them.
+
+        Args:
+            platform: Platform identifier (telegram, instagram, etc.)
+            platform_user_id: User ID on the platform
+            platform_username: Optional username on the platform
+            display_name: Optional display name for the user
+            platform_metadata: Optional platform-specific metadata
+
+        Returns:
+            Tuple of (user, platform_account, is_new_user)
+            - is_new_user is True if a new User was created
+        """
+        # 1. Check if PlatformAccount already exists
+        platform_account = self.get_platform_account(platform, platform_user_id)
+
+        if platform_account:
+            # Account exists - get the associated user
+            user = self.get_user(platform_account["user_id"])
+            if not user:
+                # Orphaned platform account (shouldn't happen, but handle it)
+                # Create a new user and update the platform account
+                user = self.create_user(display_name=display_name)
+                self.update_platform_account(
+                    platform_account["id"],
+                    {"user_id": user["id"]},
+                )
+                platform_account["user_id"] = user["id"]
+                return (user, platform_account, True)
+
+            # Update platform account metadata if provided
+            if platform_username or platform_metadata:
+                update_payload: Dict[str, Any] = {}
+                if platform_username:
+                    update_payload["platform_username"] = platform_username
+                if platform_metadata:
+                    update_payload["platform_metadata"] = platform_metadata
+                if update_payload:
+                    self.update_platform_account(platform_account["id"], update_payload)
+                    platform_account.update(update_payload)
+
+            return (user, platform_account, False)
+
+        # 2. No platform account exists - create User and PlatformAccount
+        user = self.create_user(display_name=display_name)
+        platform_account = self.create_platform_account(
+            user_id=user["id"],
+            platform=platform,
+            platform_user_id=platform_user_id,
+            platform_username=platform_username,
+            platform_metadata=platform_metadata,
+            is_primary=True,  # First platform account is primary
+        )
+
+        return (user, platform_account, True)

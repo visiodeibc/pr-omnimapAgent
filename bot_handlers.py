@@ -39,11 +39,16 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         },
     )
     
-    # Track onboarding in session metadata
+    # Track onboarding in session metadata + create/link User
     supabase_client: "SupabaseRestClient" = context.bot_data.get("supabase_client")
     if supabase_client and user and chat:
         try:
             import datetime as dt
+            # Build display name from first/last name
+            display_name = user.first_name or ""
+            if user.last_name:
+                display_name = f"{display_name} {user.last_name}".strip()
+
             supabase_client.ensure_session(
                 platform="telegram",
                 platform_user_id=str(user.id),
@@ -54,6 +59,14 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                     "last_name": user.last_name,
                     "language_code": user.language_code,
                     "onboarding_shown_at": dt.datetime.now(dt.timezone.utc).isoformat(),
+                },
+                # User linking parameters
+                platform_username=user.username,
+                display_name=display_name or None,
+                platform_metadata={
+                    "first_name": user.first_name,
+                    "last_name": user.last_name,
+                    "language_code": user.language_code,
                 },
             )
         except Exception as exc:
@@ -134,13 +147,26 @@ async def hello_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     supabase_client: SupabaseRestClient = context.bot_data["supabase_client"]
 
     try:
-        # Ensure session exists
+        # Build display name from first/last name
+        display_name = user.first_name or ""
+        if user.last_name:
+            display_name = f"{display_name} {user.last_name}".strip()
+
+        # Ensure session exists + create/link User
         session = supabase_client.ensure_session(
             platform="telegram",
             platform_user_id=str(user.id),
             platform_chat_id=chat.id,
             metadata={
                 "username": user.username,
+                "first_name": user.first_name,
+                "last_name": user.last_name,
+                "language_code": user.language_code,
+            },
+            # User linking parameters
+            platform_username=user.username,
+            display_name=display_name or None,
+            platform_metadata={
                 "first_name": user.first_name,
                 "last_name": user.last_name,
                 "language_code": user.language_code,

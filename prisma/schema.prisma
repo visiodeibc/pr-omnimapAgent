@@ -34,6 +34,60 @@ enum ContentType {
 }
 
 // Tables
+
+// Unified user across all platforms
+model User {
+  id                  String   @id @db.Uuid @default(dbgenerated("gen_random_uuid()"))
+
+  // Future auth fields (nullable for now)
+  email               String?  @unique @db.Text
+  passwordHash        String?  @db.Text @map("password_hash")
+
+  // Profile
+  displayName         String?  @db.Text @map("display_name")
+
+  // Subscription & Limits
+  subscriptionTier    String   @default("free") @db.Text @map("subscription_tier")
+  dailyRequestLimit   Int      @default(50) @map("daily_request_limit")
+  monthlyRequestLimit Int      @default(1000) @map("monthly_request_limit")
+  dailyRequestsUsed   Int      @default(0) @map("daily_requests_used")
+  monthlyRequestsUsed Int      @default(0) @map("monthly_requests_used")
+  requestsResetAt     DateTime? @map("requests_reset_at")
+
+  // Settings & metadata
+  settings            Json?    @db.JsonB
+
+  // Timestamps
+  created_at          DateTime @default(now()) @map("created_at")
+  updated_at          DateTime @default(now()) @map("updated_at")
+
+  // Relations
+  platformAccounts    PlatformAccount[]
+  sessions            Session[]
+
+  @@map("users")
+}
+
+// Links platform-specific identities to a unified user
+model PlatformAccount {
+  id               String   @id @db.Uuid @default(dbgenerated("gen_random_uuid()"))
+  user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId           String   @db.Uuid @map("user_id")
+  platform         Platform
+  platformUserId   String   @db.Text @map("platform_user_id")
+  platformUsername String?  @db.Text @map("platform_username")
+  platformMetadata Json?    @db.JsonB @map("platform_metadata")
+  isPrimary        Boolean  @default(false) @map("is_primary")
+  isVerified       Boolean  @default(false) @map("is_verified")
+  linkedAt         DateTime @default(now()) @map("linked_at")
+  created_at       DateTime @default(now()) @map("created_at")
+  updated_at       DateTime @default(now()) @map("updated_at")
+
+  @@unique([platform, platformUserId], name: "platform_accounts_platform_user_key")
+  @@index([userId], name: "idx_platform_accounts_user")
+  @@map("platform_accounts")
+}
+
 model Session {
   id               String    @id @db.Uuid @default(dbgenerated("gen_random_uuid()"))
   platform         Platform
@@ -43,11 +97,17 @@ model Session {
   lastMessageAt    DateTime  @default(now()) @map("last_message_at")
   created_at       DateTime  @default(now()) @map("created_at")
   updated_at       DateTime  @default(now()) @map("updated_at")
+
+  // Link to unified user (nullable for backwards compatibility)
+  user             User?     @relation(fields: [userId], references: [id], onDelete: SetNull)
+  userId           String?   @db.Uuid @map("user_id")
+
   memories         SessionMemory[]
   jobs             Job[]
   incomingRequests IncomingRequest[]
 
   @@unique([platform, platformUserId], name: "sessions_platform_user_id_key")
+  @@index([userId], name: "idx_sessions_user")
   @@map("sessions")
 }
 

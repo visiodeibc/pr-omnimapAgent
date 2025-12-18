@@ -243,6 +243,7 @@ async def _handle_telegram_message(
     if supabase_client:
         try:
             # Check for existing session and onboarding status
+            # Also creates/links User and PlatformAccount for this Telegram user
             session, is_new_session = supabase_client.get_or_create_active_session(
                 platform="telegram",
                 platform_user_id=incoming.user.platform_user_id,
@@ -251,6 +252,14 @@ async def _handle_telegram_message(
                     "username": incoming.user.username,
                     "display_name": incoming.user.display_name,
                 },
+                # User linking parameters
+                platform_username=incoming.user.username,
+                display_name=incoming.user.display_name,
+                platform_metadata={
+                    "first_name": incoming.user.first_name,
+                    "last_name": incoming.user.last_name,
+                    "language_code": incoming.user.language_code,
+                } if incoming.user.first_name else None,
             )
             
             # Show welcome if this is a brand new user who hasn't seen onboarding
