@@ -133,6 +133,8 @@ class AgentOrchestrator:
         model: str = "gpt-4o-mini",
         supabase_client: Optional[Any] = None,
         inactivity_threshold_minutes: int = SESSION_INACTIVITY_THRESHOLD_MINUTES,
+        timeout: float = 30.0,
+        max_retries: int = 2,
     ) -> None:
         """
         Initialize the agent orchestrator.
@@ -142,8 +144,14 @@ class AgentOrchestrator:
             model: OpenAI model to use (default: gpt-4o-mini for cost efficiency)
             supabase_client: Optional Supabase client for database operations
             inactivity_threshold_minutes: Minutes of inactivity before session expires (default 30)
+            timeout: Request timeout in seconds for OpenAI API calls (default 30.0)
+            max_retries: Number of retries for transient OpenAI API failures (default 2)
         """
-        self._openai = AsyncOpenAI(api_key=openai_api_key)
+        self._openai = AsyncOpenAI(
+            api_key=openai_api_key,
+            timeout=timeout,
+            max_retries=max_retries,
+        )
         self._model = model
         self._supabase = supabase_client
         self._inactivity_threshold = inactivity_threshold_minutes

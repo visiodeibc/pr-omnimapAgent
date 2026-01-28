@@ -89,16 +89,56 @@ async def handle_place_name(
         location_hint=location_hint,
     )
 
-    # Search Google Places
-    service = GooglePlacesService(api_key=settings.google_places.api_key)
-    try:
-        results = await service.search_place(query)
+    # Search Google Places using async context manager for guaranteed cleanup
+    async with GooglePlacesService(api_key=settings.google_places.api_key) as service:
+        try:
+            results = await service.search_place(query)
 
-        if not results:
+            if not results:
+                logger.info(
+                    "No places found for query",
+                    extra={"place_name": extracted.place_name},
+                )
+                return HandlerResult(
+                    success=True,
+                    handler_name="handle_place_name",
+                    content_type=ContentType.PLACE_NAME,
+                    data={
+                        "place_name": extracted.place_name,
+                        "location_hints": extracted.location_hints,
+                        "search_results": [],
+                        "status": "not_found",
+                    },
+                    message=f"No places found for '{extracted.place_name}'.",
+                    follow_up_actions=["search_osm"],
+                )
+
+            # Convert results to serializable format
+            search_results = [result.to_dict() for result in results]
+
             logger.info(
-                "No places found for query",
-                extra={"place_name": extracted.place_name},
+                "Place search completed successfully",
+                extra={
+                    "place_name": extracted.place_name,
+                    "results_count": len(search_results),
+                },
             )
+
+            # Build response message with results (HTML formatting for Telegram)
+            # Show up to 5 results
+            results_to_show = results[:5]
+            message = f"Found {len(results)} result(s) for '{extracted.place_name}'.\n"
+
+            for i, result in enumerate(results_to_show, start=1):
+                message += f"\n<b>{i}. {result.name}</b>\n"
+                message += f"📍 {result.formatted_address}\n"
+                if result.rating:
+                    message += f"⭐ {result.rating}"
+                    if result.user_ratings_total:
+                        message += f" ({result.user_ratings_total} reviews)"
+                    message += "\n"
+                message += f"🔗 {result.google_maps_url}\n"
+
             return HandlerResult(
                 success=True,
                 handler_name="handle_place_name",
@@ -106,76 +146,34 @@ async def handle_place_name(
                 data={
                     "place_name": extracted.place_name,
                     "location_hints": extracted.location_hints,
-                    "search_results": [],
-                    "status": "not_found",
+                    "search_results": search_results,
+                    "status": "found",
                 },
-                message=f"No places found for '{extracted.place_name}'.",
-                follow_up_actions=["search_osm"],
+                message=message,
+                follow_up_actions=["enrich_place_data", "store_candidate"],
             )
 
-        # Convert results to serializable format
-        search_results = [result.to_dict() for result in results]
-
-        logger.info(
-            "Place search completed successfully",
-            extra={
-                "place_name": extracted.place_name,
-                "results_count": len(search_results),
-            },
-        )
-
-        # Build response message with results (HTML formatting for Telegram)
-        # Show up to 5 results
-        results_to_show = results[:5]
-        message = f"Found {len(results)} result(s) for '{extracted.place_name}'.\n"
-
-        for i, result in enumerate(results_to_show, start=1):
-            message += f"\n<b>{i}. {result.name}</b>\n"
-            message += f"📍 {result.formatted_address}\n"
-            if result.rating:
-                message += f"⭐ {result.rating}"
-                if result.user_ratings_total:
-                    message += f" ({result.user_ratings_total} reviews)"
-                message += "\n"
-            message += f"🔗 {result.google_maps_url}\n"
-
-        return HandlerResult(
-            success=True,
-            handler_name="handle_place_name",
-            content_type=ContentType.PLACE_NAME,
-            data={
-                "place_name": extracted.place_name,
-                "location_hints": extracted.location_hints,
-                "search_results": search_results,
-                "status": "found",
-            },
-            message=message,
-            follow_up_actions=["enrich_place_data", "store_candidate"],
-        )
-
-    except Exception as e:
-        logger.error(
-            "Google Places search failed",
-            extra={
-                "place_name": extracted.place_name,
-                "error": str(e),
-            },
-        )
-        return HandlerResult(
-            success=False,
-            handler_name="handle_place_name",
-            content_type=ContentType.PLACE_NAME,
-            data={
-                "place_name": extracted.place_name,
-                "location_hints": extracted.location_hints,
-                "status": "error",
-            },
-            error=str(e),
-            error_code="GOOGLE_PLACES_ERROR",
-            message=f"Failed to search for '{extracted.place_name}'. Please try again later.",
-        )
-    finally:
-        await service.close()
+        except Exception as e:
+            logger.error(
+                "Google Places search failed",
+                extra={
+                    "place_name": extracted.place_name,
+                    "error": str(e),
+                },
+            )
+            return HandlerResult(
+                success=False,
+                handler_name="handle_place_name",
+                content_type=ContentType.PLACE_NAME,
+                data={
+                    "place_name": extracted.place_name,
+                    "location_hints": extracted.location_hints,
+                    "status": "error",
+                },
+                error=str(e),
+                error_code="GOOGLE_PLACES_ERROR",
+                message=f"Failed to search for '{extracted.place_name}'. Please try again later.",
+            )
 
 
 async def handle_conversation(
@@ -249,7 +247,11 @@ async def handle_conversation(
 
     # Generate contextual response using OpenAI
     try:
-        openai_client = AsyncOpenAI(api_key=settings.openai.api_key)
+        openai_client = AsyncOpenAI(
+            api_key=settings.openai.api_key,
+            timeout=settings.openai.timeout,
+            max_retries=settings.openai.max_retries,
+        )
         response = await openai_client.chat.completions.create(
             model=settings.openai.model,
             messages=[
@@ -286,13 +288,33 @@ async def handle_conversation(
             follow_up_actions=["continue_conversation"],
         )
 
-    except Exception as e:
-        logger.error(
-            "Failed to generate contextual response",
+    except TimeoutError as e:
+        logger.warning(
+            "OpenAI request timed out",
             extra={"error": str(e)},
         )
         return HandlerResult(
-            success=True,
+            success=False,
+            handler_name="handle_conversation",
+            content_type=ContentType.CONVERSATION,
+            data={
+                "message_text": extracted.message_text,
+                "topic": extracted.message_topic,
+                "intent": extracted.message_intent,
+                "status": "timeout_error",
+            },
+            error="Request timed out",
+            error_code="TIMEOUT",
+            message="I'm experiencing some delays. Please try again in a moment.",
+            follow_up_actions=["await_user_input"],
+        )
+    except Exception as e:
+        logger.error(
+            "Failed to generate contextual response",
+            extra={"error": str(e), "error_type": type(e).__name__},
+        )
+        return HandlerResult(
+            success=True,  # Return True so user gets a response
             handler_name="handle_conversation",
             content_type=ContentType.CONVERSATION,
             data={
@@ -342,7 +364,8 @@ async def handle_instagram_link(
         },
     )
 
-    # TODO: Implement actual Instagram link processing
+    # NOTE: This is a stub implementation - Instagram link processing not yet implemented
+    # Future implementation will:
     # 1. Fetch Instagram content via API or scraping
     # 2. Extract caption text
     # 3. Extract location tags
@@ -350,13 +373,13 @@ async def handle_instagram_link(
     # 5. Process comments for additional context
     # 6. Queue place extraction jobs
 
-    logger.debug(
-        "Instagram link handler completed (stub implementation)",
+    logger.warning(
+        "Instagram link handler not yet implemented",
         extra={"url": extracted.url, "content_type": extracted.link_type},
     )
 
     return HandlerResult(
-        success=True,
+        success=False,
         handler_name="handle_instagram_link",
         content_type=ContentType.INSTAGRAM_LINK,
         data={
@@ -364,9 +387,11 @@ async def handle_instagram_link(
             "content_id": extracted.link_content_id,
             "ig_username": extracted.link_username,
             "link_type": extracted.link_type,
-            "status": "pending_implementation",
+            "status": "not_implemented",
         },
-        message=f"Instagram {extracted.link_type or 'content'} link received. Content extraction will be implemented.",
+        error="Instagram link processing not yet implemented",
+        error_code="NOT_IMPLEMENTED",
+        message=f"Instagram {extracted.link_type or 'content'} link received. This feature is coming soon!",
         follow_up_actions=[
             "fetch_instagram_content",
             "extract_location_tags",
@@ -410,29 +435,32 @@ async def handle_tiktok_link(
         },
     )
 
-    # TODO: Implement actual TikTok link processing
+    # NOTE: This is a stub implementation - TikTok link processing not yet implemented
+    # Future implementation will:
     # 1. Fetch TikTok video metadata via API
     # 2. Extract description text
     # 3. Extract location information
     # 4. Process hashtags for place hints
     # 5. Queue place extraction jobs
 
-    logger.debug(
-        "TikTok link handler completed (stub implementation)",
+    logger.warning(
+        "TikTok link handler not yet implemented",
         extra={"url": extracted.url, "video_id": extracted.link_content_id},
     )
 
     return HandlerResult(
-        success=True,
+        success=False,
         handler_name="handle_tiktok_link",
         content_type=ContentType.TIKTOK_LINK,
         data={
             "url": extracted.url,
             "video_id": extracted.link_content_id,
             "tiktok_username": extracted.link_username,
-            "status": "pending_implementation",
+            "status": "not_implemented",
         },
-        message="TikTok video link received. Content extraction will be implemented.",
+        error="TikTok link processing not yet implemented",
+        error_code="NOT_IMPLEMENTED",
+        message="TikTok video link received. This feature is coming soon!",
         follow_up_actions=[
             "fetch_tiktok_content",
             "extract_location_info",
@@ -475,27 +503,30 @@ async def handle_other_link(
         },
     )
 
-    # TODO: Implement other link processing
+    # NOTE: This is a stub implementation - generic link processing not yet implemented
+    # Future implementation will:
     # 1. Fetch link content/metadata
     # 2. Determine content type (article, map, business listing, etc.)
     # 3. Extract relevant place information
     # 4. Route to specialized processor based on domain
 
-    logger.debug(
-        "Other link handler completed (stub implementation)",
+    logger.warning(
+        "Other link handler not yet implemented",
         extra={"url": extracted.url, "domain": extracted.link_domain},
     )
 
     return HandlerResult(
-        success=True,
+        success=False,
         handler_name="handle_other_link",
         content_type=ContentType.OTHER_LINK,
         data={
             "url": extracted.url,
             "domain": extracted.link_domain,
-            "status": "pending_implementation",
+            "status": "not_implemented",
         },
-        message=f"Link from {extracted.link_domain} received. Content analysis will be implemented.",
+        error="Generic link processing not yet implemented",
+        error_code="NOT_IMPLEMENTED",
+        message=f"Link from {extracted.link_domain} received. This feature is coming soon!",
         follow_up_actions=["fetch_link_metadata", "analyze_content", "extract_places"],
     )
 

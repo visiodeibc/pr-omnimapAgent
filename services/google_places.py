@@ -12,6 +12,7 @@ from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 import httpx
 
 from logging_config import get_logger
+from utils.retry import retry_async
 
 logger = get_logger(__name__)
 
@@ -101,11 +102,13 @@ class GooglePlacesService:
     This service provides methods for searching places by text query,
     supporting both single and batch operations.
 
+    Can be used as an async context manager for automatic resource cleanup:
+
     Example:
-        service = GooglePlacesService(api_key="your-api-key")
-        results = await service.search_place(
-            PlaceSearchQuery(query="Starbucks", location_hint="Tokyo")
-        )
+        async with GooglePlacesService(api_key="your-api-key") as service:
+            results = await service.search_place(
+                PlaceSearchQuery(query="Starbucks", location_hint="Tokyo")
+            )
     """
 
     def __init__(self, api_key: str, timeout: float = 30.0):
@@ -119,6 +122,14 @@ class GooglePlacesService:
         self._api_key = api_key
         self._timeout = timeout
         self._client: Optional[httpx.AsyncClient] = None
+
+    async def __aenter__(self) -> "GooglePlacesService":
+        """Async context manager entry."""
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+        """Async context manager exit - ensures cleanup."""
+        await self.close()
 
     async def _get_client(self) -> httpx.AsyncClient:
         """Get or create the HTTP client."""
@@ -171,7 +182,14 @@ class GooglePlacesService:
         )
 
         try:
-            response = await client.post(PLACES_API_BASE_URL, json=request_body)
+            # Use retry logic for transient failures (rate limits, server errors)
+            response = await retry_async(
+                client.post,
+                PLACES_API_BASE_URL,
+                json=request_body,
+                max_attempts=3,
+                base_delay=1.0,
+            )
             response.raise_for_status()
             data = response.json()
 

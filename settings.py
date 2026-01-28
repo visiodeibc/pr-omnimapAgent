@@ -45,6 +45,8 @@ class OpenAISettings:
 
     api_key: str
     model: str = "gpt-4o-mini"  # Cost-efficient default
+    timeout: float = 30.0  # Request timeout in seconds
+    max_retries: int = 2  # Number of retries for transient failures
 
 
 @dataclass(frozen=True)
@@ -162,9 +164,21 @@ def get_settings() -> Settings:
     openai_settings = None
     openai_api_key = os.getenv("OPENAI_API_KEY")
     if openai_api_key:
+        try:
+            openai_timeout = float(os.getenv("OPENAI_TIMEOUT", "30.0"))
+        except ValueError:
+            openai_timeout = 30.0
+
+        try:
+            openai_max_retries = int(os.getenv("OPENAI_MAX_RETRIES", "2"))
+        except ValueError:
+            openai_max_retries = 2
+
         openai_settings = OpenAISettings(
             api_key=openai_api_key,
             model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+            timeout=openai_timeout,
+            max_retries=openai_max_retries,
         )
 
     # Load Google Places settings (optional, enables place search)

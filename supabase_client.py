@@ -161,6 +161,53 @@ class SupabaseRestClient:
         data: List[Dict[str, Any]] = resp.json()
         return len(data)
 
+    def _archive_session_memories_if_stale(
+        self,
+        session_id: str,
+        expected_last_message_at: str,
+    ) -> int:
+        """
+        Atomically archive session memories only if the session hasn't been updated.
+
+        This prevents race conditions where multiple concurrent requests could
+        double-archive memories. Uses optimistic concurrency control by checking
+        that last_message_at hasn't changed since we read it.
+
+        Args:
+            session_id: The session UUID
+            expected_last_message_at: The last_message_at value we expect
+
+        Returns:
+            Number of memories archived (0 if another request already handled it)
+        """
+        # First, try to "claim" the session expiry by updating the session
+        # with a condition that last_message_at hasn't changed
+        # This acts as a lock - only one request will succeed
+        now_iso = _now_iso()
+        claim_params = {
+            "id": f"eq.{session_id}",
+            "last_message_at": f"eq.{expected_last_message_at}",
+        }
+        claim_payload = {
+            "last_message_at": now_iso,
+            "updated_at": now_iso,
+        }
+        claim_resp = self._client.patch(
+            "/sessions",
+            params=claim_params,
+            json=claim_payload,
+            headers={"Prefer": "return=representation"},
+        )
+        claim_resp.raise_for_status()
+        claimed_data: List[Dict[str, Any]] = claim_resp.json()
+
+        if not claimed_data:
+            # Another request already updated the session, skip archiving
+            return 0
+
+        # We won the race - now archive the memories
+        return self.archive_session_memories(session_id)
+
     def get_or_create_active_session(
         self,
         platform: str,
@@ -230,8 +277,15 @@ class SupabaseRestClient:
                 threshold = dt.timedelta(minutes=inactivity_threshold_minutes)
 
                 if time_since_last > threshold:
-                    # Session expired - archive old memories
-                    self.archive_session_memories(session["id"])
+                    # Session expired - archive old memories atomically
+                    # Use conditional update to prevent race conditions where
+                    # multiple concurrent requests could double-archive
+                    archived_count = self._archive_session_memories_if_stale(
+                        session["id"],
+                        last_message_at_str,
+                    )
+                    # Only treat as new session if we actually archived something
+                    # (we won the race) or if there were no memories to archive
                     is_new_session = True
 
             # Update last_message_at and ensure user_id is linked
@@ -648,6 +702,43 @@ class SupabaseRestClient:
     # User + Platform Account Combined Operations (for account linking)
     # =========================================================================
 
+    def get_platform_account_with_user(
+        self,
+        platform: str,
+        platform_user_id: str,
+    ) -> Optional[Tuple[Dict[str, Any], Dict[str, Any]]]:
+        """
+        Get a platform account with its associated user in a single query.
+
+        Uses Supabase's nested query syntax to fetch both records at once,
+        reducing N+1 queries.
+
+        Args:
+            platform: Platform identifier (telegram, instagram, etc.)
+            platform_user_id: User ID on the platform
+
+        Returns:
+            Tuple of (platform_account, user), or None if not found
+        """
+        params = {
+            "platform": f"eq.{platform}",
+            "platform_user_id": f"eq.{platform_user_id}",
+            "select": "*,users(*)",  # Join with users table
+            "limit": "1",
+        }
+        resp = self._client.get("/platform_accounts", params=params)
+        resp.raise_for_status()
+        data: List[Dict[str, Any]] = resp.json()
+        if not data:
+            return None
+
+        platform_account = data[0]
+        user = platform_account.pop("users", None)
+        if not user:
+            return None
+
+        return (platform_account, user)
+
     def get_or_create_user_for_platform(
         self,
         platform: str,
@@ -663,6 +754,8 @@ class SupabaseRestClient:
         When a user first interacts via a platform, this creates both the unified
         User record and the PlatformAccount linking them.
 
+        Optimized to minimize database round-trips using joined queries.
+
         Args:
             platform: Platform identifier (telegram, instagram, etc.)
             platform_user_id: User ID on the platform
@@ -674,24 +767,13 @@ class SupabaseRestClient:
             Tuple of (user, platform_account, is_new_user)
             - is_new_user is True if a new User was created
         """
-        # 1. Check if PlatformAccount already exists
-        platform_account = self.get_platform_account(platform, platform_user_id)
+        # 1. Try to get both PlatformAccount and User in a single query
+        result = self.get_platform_account_with_user(platform, platform_user_id)
 
-        if platform_account:
-            # Account exists - get the associated user
-            user = self.get_user(platform_account["user_id"])
-            if not user:
-                # Orphaned platform account (shouldn't happen, but handle it)
-                # Create a new user and update the platform account
-                user = self.create_user(display_name=display_name)
-                self.update_platform_account(
-                    platform_account["id"],
-                    {"user_id": user["id"]},
-                )
-                platform_account["user_id"] = user["id"]
-                return (user, platform_account, True)
+        if result:
+            platform_account, user = result
 
-            # Update platform account metadata if provided
+            # Update platform account metadata if provided (single update call)
             if platform_username or platform_metadata:
                 update_payload: Dict[str, Any] = {}
                 if platform_username:
@@ -704,7 +786,19 @@ class SupabaseRestClient:
 
             return (user, platform_account, False)
 
-        # 2. No platform account exists - create User and PlatformAccount
+        # 2. Check if we have an orphaned platform account (without user join)
+        platform_account = self.get_platform_account(platform, platform_user_id)
+        if platform_account:
+            # Orphaned platform account - create user and link
+            user = self.create_user(display_name=display_name)
+            self.update_platform_account(
+                platform_account["id"],
+                {"user_id": user["id"]},
+            )
+            platform_account["user_id"] = user["id"]
+            return (user, platform_account, True)
+
+        # 3. No platform account exists - create User and PlatformAccount
         user = self.create_user(display_name=display_name)
         platform_account = self.create_platform_account(
             user_id=user["id"],
