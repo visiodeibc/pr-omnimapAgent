@@ -82,6 +82,42 @@ def _initialize_adapters(settings, bot: Optional[Any] = None) -> AdapterRegistry
     return registry
 
 
+async def _verify_supabase_connectivity(client: SupabaseRestClient) -> bool:
+    """
+    Verify Supabase connectivity by performing a simple query.
+
+    Returns:
+        True if connection is successful, False otherwise
+    """
+    try:
+        # Attempt a simple query to verify connectivity
+        # This queries the sessions table with a limit of 0 (just checks connectivity)
+        client.get_session("00000000-0000-0000-0000-000000000000")
+        return True
+    except Exception as exc:
+        logger.error("Supabase connectivity check failed: %s", exc)
+        return False
+
+
+async def _verify_openai_connectivity(api_key: str, timeout: float = 10.0) -> bool:
+    """
+    Verify OpenAI API connectivity by listing models.
+
+    Returns:
+        True if connection is successful, False otherwise
+    """
+    try:
+        from openai import AsyncOpenAI
+
+        client = AsyncOpenAI(api_key=api_key, timeout=timeout)
+        # Simple API call to verify connectivity
+        await client.models.list()
+        return True
+    except Exception as exc:
+        logger.error("OpenAI connectivity check failed: %s", exc)
+        return False
+
+
 @app.on_event("startup")
 async def startup() -> None:
     """Initialize bot, adapters, agent orchestrator, and start worker on startup."""
@@ -104,6 +140,15 @@ async def startup() -> None:
     # Store Supabase client in bot_data for handlers
     supabase_client = SupabaseRestClient(settings.supabase_url, settings.supabase_key)
     _bot_application.bot_data["supabase_client"] = supabase_client
+
+    # Verify Supabase connectivity at startup
+    if not await _verify_supabase_connectivity(supabase_client):
+        logger.warning(
+            "Supabase connectivity check failed at startup - "
+            "the service may not function correctly"
+        )
+    else:
+        logger.info("Supabase connectivity verified")
 
     # Register command handlers
     _bot_application.add_handler(CommandHandler("start", start_command))
@@ -136,14 +181,28 @@ async def startup() -> None:
     # Initialize agent orchestrator if OpenAI is configured
     global _agent_orchestrator  # noqa: PLW0603
     if settings.openai:
+        # Verify OpenAI connectivity at startup
+        if not await _verify_openai_connectivity(settings.openai.api_key):
+            logger.warning(
+                "OpenAI connectivity check failed at startup - "
+                "agentic workflow may not function correctly"
+            )
+        else:
+            logger.info("OpenAI connectivity verified")
+
         _agent_orchestrator = AgentOrchestrator(
             openai_api_key=settings.openai.api_key,
             model=settings.openai.model,
             supabase_client=supabase_client,
+            timeout=settings.openai.timeout,
+            max_retries=settings.openai.max_retries,
         )
         logger.info(
             "Agent orchestrator initialized",
-            extra={"model": settings.openai.model},
+            extra={
+                "model": settings.openai.model,
+                "timeout": settings.openai.timeout,
+            },
         )
     else:
         logger.warning("OpenAI not configured, agentic workflow disabled")
@@ -473,9 +532,16 @@ async def instagram_webhook_verify(request: Request) -> Any:
     challenge = params.get("hub.challenge")
 
     settings = get_settings()
-    verify_token = (
-        settings.instagram.app_secret if settings.instagram else None
-    ) or "omnimap_verify"
+    # Use a dedicated verify token from Instagram settings
+    # Never fall back to a hardcoded value - require proper configuration
+    if not settings.instagram or not settings.instagram.app_secret:
+        logger.error("Instagram webhook verification failed: app_secret not configured")
+        raise HTTPException(
+            status_code=501,
+            detail="Instagram webhook verification not configured"
+        )
+
+    verify_token = settings.instagram.app_secret
 
     if mode == "subscribe" and token == verify_token:
         logger.info("Instagram webhook verified successfully")

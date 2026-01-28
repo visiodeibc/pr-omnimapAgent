@@ -118,13 +118,22 @@ class TelegramAdapter(MessagingAdapter):
         Synchronous wrapper for send_message.
 
         Useful when calling from a sync context (e.g., worker thread).
+        Uses asyncio.run() which is the recommended approach for Python 3.7+.
         """
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
         try:
-            return loop.run_until_complete(self.send_message(message))
-        finally:
-            loop.close()
+            return asyncio.run(self.send_message(message))
+        except RuntimeError as exc:
+            # Handle case where we're already in an async context
+            if "cannot be called from a running event loop" in str(exc):
+                logger.warning(
+                    "Cannot use asyncio.run() from async context, using fallback"
+                )
+                loop = asyncio.new_event_loop()
+                try:
+                    return loop.run_until_complete(self.send_message(message))
+                finally:
+                    loop.close()
+            raise
 
     def parse_incoming(self, raw_payload: Dict[str, Any]) -> Optional[IncomingMessage]:
         """Parse a Telegram webhook update into an IncomingMessage."""

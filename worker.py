@@ -10,6 +10,7 @@ from adapters.registry import AdapterRegistry
 from logging_config import get_logger
 from settings import Settings
 from supabase_client import SupabaseRestClient
+from utils.retry import retry_sync
 
 logger = get_logger(__name__)
 
@@ -48,23 +49,46 @@ class UnifiedWorker:
                     time.sleep(self._settings.poll_interval)
                     continue
                 self._process_job(claimed)
+            except KeyboardInterrupt:
+                logger.info("Worker loop interrupted by user")
+                break
+            except httpx.HTTPError as exc:
+                logger.error("HTTP error in worker loop: %s", exc)
+                time.sleep(self._settings.poll_interval)
+            except (OSError, IOError) as exc:
+                logger.error("I/O error in worker loop: %s", exc)
+                time.sleep(self._settings.poll_interval)
             except Exception as exc:  # noqa: BLE001
-                logger.exception("Worker loop error: %s", exc)
+                # Log unexpected errors but continue running
+                logger.exception("Unexpected error in worker loop: %s", exc)
                 time.sleep(self._settings.poll_interval)
 
     def _claim_next_job(self) -> Optional[Dict[str, Any]]:
-        """Fetch and claim the next available job."""
+        """Fetch and claim the next available job with retry logic."""
         try:
-            job = self._client.fetch_next_job(self.HANDLED_TYPES)
+            # Use retry for transient database/network errors
+            job = retry_sync(
+                self._client.fetch_next_job,
+                self.HANDLED_TYPES,
+                max_attempts=3,
+                base_delay=1.0,
+                retryable_exceptions=(httpx.HTTPError, httpx.TimeoutException),
+            )
         except httpx.HTTPError as exc:
-            logger.error("Failed to fetch next job: %s", exc)
+            logger.error("Failed to fetch next job after retries: %s", exc)
             return None
         if not job:
             return None
         try:
-            claimed = self._client.claim_job(job["id"])
+            claimed = retry_sync(
+                self._client.claim_job,
+                job["id"],
+                max_attempts=3,
+                base_delay=0.5,
+                retryable_exceptions=(httpx.HTTPError, httpx.TimeoutException),
+            )
         except httpx.HTTPError as exc:
-            logger.error("Failed to claim job %s: %s", job["id"], exc)
+            logger.error("Failed to claim job %s after retries: %s", job["id"], exc)
             return None
         if not claimed:
             return None
@@ -87,13 +111,32 @@ class UnifiedWorker:
                 error_msg = f"Unknown job type: {job_type}"
                 logger.error(error_msg)
                 self._client.update_job(job_id, {"status": "failed", "error": error_msg})
-        except Exception as exc:  # noqa: BLE001
-            logger.exception("Error processing job %s: %s", job_id, exc)
+        except httpx.HTTPError as exc:
+            logger.error("HTTP error processing job %s: %s", job_id, exc)
             self._client.update_job(
                 job_id,
                 {
                     "status": "failed",
-                    "error": str(exc),
+                    "error": f"HTTP error: {exc}",
+                },
+            )
+        except (ValueError, TypeError, KeyError) as exc:
+            logger.error("Data error processing job %s: %s", job_id, exc)
+            self._client.update_job(
+                job_id,
+                {
+                    "status": "failed",
+                    "error": f"Data error: {exc}",
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            # Catch-all for unexpected errors to prevent worker crash
+            logger.exception("Unexpected error processing job %s: %s", job_id, exc)
+            self._client.update_job(
+                job_id,
+                {
+                    "status": "failed",
+                    "error": f"Unexpected error: {exc}",
                 },
             )
 
@@ -160,16 +203,30 @@ class UnifiedWorker:
             **kwargs,
         )
 
-        # Run async send in sync context
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+        # Run async send in sync context using asyncio.run()
+        # This is the recommended approach for Python 3.7+ as it properly
+        # creates and cleans up the event loop
         try:
-            result = loop.run_until_complete(adapter.send_message(message))
+            result = asyncio.run(adapter.send_message(message))
             if not result.success:
                 logger.error("Failed to send message: %s", result.error)
             return result.success
-        finally:
-            loop.close()
+        except RuntimeError as exc:
+            # Handle case where we're already in an async context
+            if "cannot be called from a running event loop" in str(exc):
+                logger.warning(
+                    "Cannot use asyncio.run() from async context, using nest_asyncio fallback"
+                )
+                # Fallback for nested async contexts (rare but possible)
+                loop = asyncio.new_event_loop()
+                try:
+                    result = loop.run_until_complete(adapter.send_message(message))
+                    if not result.success:
+                        logger.error("Failed to send message: %s", result.error)
+                    return result.success
+                finally:
+                    loop.close()
+            raise
 
     def _process_python_hello(self, job: Dict[str, Any]) -> None:
         """Process python_hello job."""
