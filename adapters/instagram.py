@@ -220,7 +220,14 @@ class InstagramAdapter(MessagingAdapter):
 
         signature_header = headers.get("x-hub-signature-256", "")
         if not signature_header.startswith("sha256="):
-            logger.warning("Invalid signature format")
+            header_keys = ",".join(sorted(headers.keys()))
+            header_preview = signature_header[:32] + "..." if signature_header else ""
+            logger.warning(
+                "Invalid signature format: header_present=%s header_value=%s header_keys=%s",
+                bool(signature_header),
+                header_preview,
+                header_keys,
+            )
             return False
 
         expected_signature = signature_header[7:]  # Remove "sha256=" prefix
@@ -230,7 +237,18 @@ class InstagramAdapter(MessagingAdapter):
             hashlib.sha256,
         ).hexdigest()
 
-        return hmac.compare_digest(expected_signature, computed_signature)
+        if not hmac.compare_digest(expected_signature, computed_signature):
+            secret_fingerprint = hashlib.sha256(self._app_secret.encode("utf-8")).hexdigest()[:8]
+            logger.error(
+                "Invalid Instagram webhook signature: expected_prefix=%s computed_prefix=%s body_length=%s secret_fingerprint=%s",
+                expected_signature[:16],
+                computed_signature[:16],
+                len(body),
+                secret_fingerprint,
+            )
+            return False
+
+        return True
 
     async def shutdown(self) -> None:
         """Close the HTTP client."""

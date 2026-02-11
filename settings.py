@@ -21,6 +21,19 @@ class InstagramSettings:
     access_token: str
     app_secret: Optional[str] = None
     account_id: Optional[str] = None
+    verify_token: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class FacebookSettings:
+    """Facebook app settings for OAuth and Graph API usage."""
+
+    app_id: str
+    app_secret: str
+    redirect_uri: str
+    login_scopes: str
+    graph_api_version: str
+    allowed_return_urls: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -70,6 +83,7 @@ class Settings:
     telegram: Optional[TelegramSettings] = None
     instagram: Optional[InstagramSettings] = None
     tiktok: Optional[TikTokSettings] = None
+    facebook: Optional[FacebookSettings] = None
 
     # External API settings
     google_places: Optional[GooglePlacesSettings] = None
@@ -147,6 +161,7 @@ def get_settings() -> Settings:
             access_token=ig_access_token,
             app_secret=os.getenv("INSTAGRAM_APP_SECRET"),
             account_id=os.getenv("INSTAGRAM_ACCOUNT_ID"),
+            verify_token=os.getenv("INSTAGRAM_VERIFY_TOKEN"),
         )
 
     # Load TikTok settings (optional)
@@ -158,6 +173,44 @@ def get_settings() -> Settings:
             client_key=tiktok_client_key,
             client_secret=tiktok_client_secret,
             access_token=os.getenv("TIKTOK_ACCESS_TOKEN"),
+        )
+
+    # Load Facebook app settings (optional, enables OAuth helper endpoints)
+    facebook_settings = None
+    facebook_app_id = os.getenv("FACEBOOK_APP_ID")
+    facebook_app_secret = os.getenv("FACEBOOK_APP_SECRET")
+    facebook_redirect_uri = os.getenv("FACEBOOK_REDIRECT_URI")
+    facebook_scopes = os.getenv(
+        "FACEBOOK_LOGIN_SCOPES",
+        "pages_show_list,pages_read_engagement,pages_manage_metadata,instagram_manage_messages",
+    )
+    facebook_graph_version = os.getenv("FACEBOOK_GRAPH_API_VERSION", "v24.0")
+    facebook_allowed_return_urls = tuple(
+        value.strip()
+        for value in os.getenv("FACEBOOK_ALLOWED_RETURN_URLS", "").split(",")
+        if value.strip()
+    )
+
+    if facebook_app_id or facebook_app_secret or facebook_redirect_uri:
+        if not facebook_app_id or not facebook_app_secret:
+            raise RuntimeError(
+                "FACEBOOK_APP_ID and FACEBOOK_APP_SECRET are required for Facebook OAuth"
+            )
+
+        if not facebook_redirect_uri:
+            if not public_url:
+                raise RuntimeError(
+                    "FACEBOOK_REDIRECT_URI or PUBLIC_URL must be set for Facebook OAuth"
+                )
+            facebook_redirect_uri = f"{public_url.rstrip('/')}/auth/facebook/callback"
+
+        facebook_settings = FacebookSettings(
+            app_id=facebook_app_id,
+            app_secret=facebook_app_secret,
+            redirect_uri=facebook_redirect_uri,
+            login_scopes=facebook_scopes,
+            graph_api_version=facebook_graph_version,
+            allowed_return_urls=facebook_allowed_return_urls,
         )
 
     # Load OpenAI settings (optional, enables agentic workflow)
@@ -200,6 +253,7 @@ def get_settings() -> Settings:
         telegram=telegram_settings,
         instagram=instagram_settings,
         tiktok=tiktok_settings,
+        facebook=facebook_settings,
         google_places=google_places_settings,
     )
 

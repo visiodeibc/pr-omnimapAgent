@@ -80,10 +80,19 @@ PYTHON_WORKER_ENABLED=true
 INSTAGRAM_ACCESS_TOKEN=your_page_access_token
 INSTAGRAM_APP_SECRET=your_app_secret
 INSTAGRAM_ACCOUNT_ID=your_account_id
+INSTAGRAM_VERIFY_TOKEN=your_verify_token
 
 # TikTok (optional)
 TIKTOK_CLIENT_KEY=your_client_key
 TIKTOK_CLIENT_SECRET=your_client_secret
+
+# Facebook OAuth (optional)
+FACEBOOK_APP_ID=your_facebook_app_id
+FACEBOOK_APP_SECRET=your_facebook_app_secret
+FACEBOOK_REDIRECT_URI=https://your-backend-domain.com/auth/facebook/callback
+FACEBOOK_LOGIN_SCOPES=pages_show_list,pages_read_engagement,pages_manage_metadata,instagram_manage_messages
+FACEBOOK_GRAPH_API_VERSION=v24.0
+FACEBOOK_ALLOWED_RETURN_URLS=https://your-frontend-domain.com/auth/facebook/connect,http://localhost:3000/auth/facebook/connect
 ```
 
 ### 3. Database Setup (Prisma)
@@ -137,14 +146,27 @@ docker run -p 8080:8080 \
 
 ## 🔌 API Endpoints
 
-| Endpoint         | Method | Description                    |
-| ---------------- | ------ | ------------------------------ |
-| `/health`        | GET    | Health check                   |
-| `/api/tg`        | POST   | Telegram webhook               |
-| `/api/instagram` | GET    | Instagram webhook verification |
-| `/api/instagram` | POST   | Instagram webhook events       |
-| `/api/tiktok`    | GET    | TikTok webhook verification    |
-| `/api/tiktok`    | POST   | TikTok webhook events          |
+| Endpoint                   | Method | Description                               |
+| -------------------------- | ------ | ----------------------------------------- |
+| `/health`                  | GET    | Health check                              |
+| `/auth/facebook/login`     | GET    | Start Facebook OAuth flow                 |
+| `/auth/facebook/callback`  | GET    | Exchange code and return JSON or redirect |
+| `/auth/facebook/subscribe` | POST   | Subscribe selected page to app            |
+| `/api/tg`                  | POST   | Telegram webhook                          |
+| `/api/instagram`           | GET    | Instagram webhook verification            |
+| `/api/instagram`           | POST   | Instagram webhook events                  |
+| `/api/tiktok`              | GET    | TikTok webhook verification               |
+| `/api/tiktok`              | POST   | TikTok webhook events                     |
+
+### Facebook OAuth flow for hosted testing
+
+1. Configure your Meta app with:
+   - Valid OAuth Redirect URI: `https://<agent-domain>/auth/facebook/callback`
+   - Requested scopes including `pages_read_engagement,pages_manage_metadata`
+2. Set backend env vars from the block above.
+3. Open:
+   - `https://<agent-domain>/auth/facebook/login?return_to=https://<frontend-domain>/auth/facebook/connect&include_page_tokens=true`
+4. After approval, backend redirects to the frontend `return_to` URL with connection status and selected token fields in query params.
 
 ## 🤖 Bot Commands
 
