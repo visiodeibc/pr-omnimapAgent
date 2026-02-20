@@ -1,5 +1,6 @@
 import secrets
 import json
+import re
 from threading import Thread
 from typing import Any, Optional
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
@@ -22,7 +23,7 @@ from telegram.ext import (
     filters,
 )
 
-from adapters.base import Platform
+from adapters.base import OutgoingMessage, Platform
 from adapters.instagram import InstagramAdapter
 from adapters.registry import AdapterRegistry, get_adapter_registry
 from adapters.telegram import TelegramAdapter
@@ -801,11 +802,50 @@ async def _process_platform_webhook(
             },
         )
 
+        # Send handler response back to the originating chat for non-Telegram webhooks.
+        # Telegram has its own update handler path, but this unified webhook path
+        # should mirror the same "process + reply" behavior for Instagram/TikTok.
+        response_sent = False
+        response_error = None
+        if result.message:
+            outbound_text = result.message
+            if platform != Platform.TELEGRAM:
+                # Non-Telegram platforms do not support Telegram HTML parse modes.
+                outbound_text = re.sub(r"<br\\s*/?>", "\n", outbound_text, flags=re.IGNORECASE)
+                outbound_text = re.sub(r"</p\\s*>", "\n\n", outbound_text, flags=re.IGNORECASE)
+                outbound_text = re.sub(r"<[^>]+>", "", outbound_text).strip()
+
+            delivery = await adapter.send_message(
+                OutgoingMessage(
+                    chat_id=incoming.chat.platform_chat_id,
+                    text=outbound_text,
+                    platform=platform,
+                )
+            )
+            response_sent = delivery.success
+            response_error = delivery.error
+
+            if not delivery.success:
+                logger.error(
+                    "Failed sending platform response",
+                    extra={
+                        "platform": platform.value,
+                        "chat_id": incoming.chat.platform_chat_id,
+                        "error": delivery.error,
+                    },
+                )
+
         # Flush debug logs to user in dev mode
         if debug_reporter.enabled:
             await debug_reporter.flush()
 
-        return {"status": "ok", "processed": True, "content_type": result.content_type.value}
+        return {
+            "status": "ok",
+            "processed": True,
+            "content_type": result.content_type.value,
+            "response_sent": response_sent,
+            "response_error": response_error,
+        }
 
     # No orchestrator - just send debug info if in dev mode
     if debug_reporter.enabled:
