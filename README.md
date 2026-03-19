@@ -81,6 +81,8 @@ INSTAGRAM_ACCESS_TOKEN=your_page_access_token
 INSTAGRAM_APP_SECRET=your_app_secret
 INSTAGRAM_ACCOUNT_ID=your_account_id
 INSTAGRAM_VERIFY_TOKEN=your_verify_token
+# Optional: per-account token map (JSON object)
+# INSTAGRAM_ACCESS_TOKEN_MAP={"17841467615207225":"EAAG..."}
 
 # TikTok (optional)
 TIKTOK_CLIENT_KEY=your_client_key
@@ -90,7 +92,7 @@ TIKTOK_CLIENT_SECRET=your_client_secret
 FACEBOOK_APP_ID=your_facebook_app_id
 FACEBOOK_APP_SECRET=your_facebook_app_secret
 FACEBOOK_REDIRECT_URI=https://your-backend-domain.com/auth/facebook/callback
-FACEBOOK_LOGIN_SCOPES=pages_show_list,pages_read_engagement,pages_manage_metadata,instagram_manage_messages
+FACEBOOK_LOGIN_SCOPES=pages_show_list,pages_read_engagement,pages_manage_metadata,instagram_manage_messages,instagram_business_manage_messages
 FACEBOOK_GRAPH_API_VERSION=v24.0
 FACEBOOK_ALLOWED_RETURN_URLS=https://your-frontend-domain.com/auth/facebook/connect,http://localhost:3000/auth/facebook/connect
 ```

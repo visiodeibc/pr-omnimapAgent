@@ -1,7 +1,8 @@
+import json
 import os
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Optional
+from typing import Dict, Optional
 
 from logging_config import get_environment
 
@@ -18,10 +19,11 @@ class TelegramSettings:
 class InstagramSettings:
     """Instagram-specific settings."""
 
-    access_token: str
+    access_token: Optional[str] = None
     app_secret: Optional[str] = None
     account_id: Optional[str] = None
     verify_token: Optional[str] = None
+    access_token_map: Optional[Dict[str, str]] = None
 
 
 @dataclass(frozen=True)
@@ -156,12 +158,37 @@ def get_settings() -> Settings:
     # Load Instagram settings (optional)
     instagram_settings = None
     ig_access_token = os.getenv("INSTAGRAM_ACCESS_TOKEN")
-    if ig_access_token:
+    ig_access_token_map_raw = os.getenv("INSTAGRAM_ACCESS_TOKEN_MAP")
+    access_token_map: Optional[Dict[str, str]] = None
+    if ig_access_token_map_raw:
+        try:
+            parsed_map = json.loads(ig_access_token_map_raw)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                "INSTAGRAM_ACCESS_TOKEN_MAP must be valid JSON (object mapping account_id -> token)"
+            ) from exc
+        if not isinstance(parsed_map, dict) or not parsed_map:
+            raise RuntimeError(
+                "INSTAGRAM_ACCESS_TOKEN_MAP must be a non-empty JSON object mapping account_id -> token"
+            )
+        normalized_map: Dict[str, str] = {}
+        for acct_id, token in parsed_map.items():
+            if not acct_id or not token:
+                continue
+            normalized_map[str(acct_id)] = str(token)
+        if not normalized_map:
+            raise RuntimeError(
+                "INSTAGRAM_ACCESS_TOKEN_MAP must contain at least one account_id -> token entry"
+            )
+        access_token_map = normalized_map
+
+    if ig_access_token or access_token_map:
         instagram_settings = InstagramSettings(
             access_token=ig_access_token,
             app_secret=os.getenv("INSTAGRAM_APP_SECRET"),
             account_id=os.getenv("INSTAGRAM_ACCOUNT_ID"),
             verify_token=os.getenv("INSTAGRAM_VERIFY_TOKEN"),
+            access_token_map=access_token_map,
         )
 
     # Load TikTok settings (optional)
@@ -182,7 +209,8 @@ def get_settings() -> Settings:
     facebook_redirect_uri = os.getenv("FACEBOOK_REDIRECT_URI")
     facebook_scopes = os.getenv(
         "FACEBOOK_LOGIN_SCOPES",
-        "pages_show_list,pages_read_engagement,pages_manage_metadata,instagram_manage_messages",
+        "pages_show_list,pages_read_engagement,pages_manage_metadata,"
+        "instagram_business_basic,instagram_business_manage_messages",
     )
     facebook_graph_version = os.getenv("FACEBOOK_GRAPH_API_VERSION", "v24.0")
     facebook_allowed_return_urls = tuple(

@@ -26,7 +26,8 @@ enum Platform {
 
 enum ContentType {
   place_name       // User mentioned a place name
-  question         // User asked a question
+  question         // Legacy: renamed to conversation (kept for backward compat)
+  conversation     // Questions, greetings, general chat
   instagram_link   // Link to Instagram post/reel
   tiktok_link      // Link to TikTok post/reel
   other_link       // Other URL links

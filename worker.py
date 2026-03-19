@@ -42,13 +42,32 @@ class UnifiedWorker:
         """Main worker loop - polls for and processes jobs."""
         logger.info("Starting unified worker loop (handling: %s)", self.HANDLED_TYPES)
         logger.info("Configured platforms: %s", self._adapters.list_platforms())
+        consecutive_auth_failures = 0
         while True:
             try:
                 claimed = self._claim_next_job()
                 if not claimed:
-                    time.sleep(self._settings.poll_interval)
+                    if consecutive_auth_failures > 0:
+                        backoff = min(60, self._settings.poll_interval * (2 ** consecutive_auth_failures))
+                        time.sleep(backoff)
+                    else:
+                        time.sleep(self._settings.poll_interval)
                     continue
+                consecutive_auth_failures = 0
                 self._process_job(claimed)
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code in (401, 403):
+                    consecutive_auth_failures += 1
+                    backoff = min(60, self._settings.poll_interval * (2 ** consecutive_auth_failures))
+                    logger.error(
+                        "Supabase auth failure #%d, backing off %.0fs",
+                        consecutive_auth_failures,
+                        backoff,
+                    )
+                    time.sleep(backoff)
+                else:
+                    logger.error("HTTP error in worker loop: %s", exc)
+                    time.sleep(self._settings.poll_interval)
             except KeyboardInterrupt:
                 logger.info("Worker loop interrupted by user")
                 break
@@ -59,21 +78,28 @@ class UnifiedWorker:
                 logger.error("I/O error in worker loop: %s", exc)
                 time.sleep(self._settings.poll_interval)
             except Exception as exc:  # noqa: BLE001
-                # Log unexpected errors but continue running
                 logger.exception("Unexpected error in worker loop: %s", exc)
                 time.sleep(self._settings.poll_interval)
 
     def _claim_next_job(self) -> Optional[Dict[str, Any]]:
         """Fetch and claim the next available job with retry logic."""
         try:
-            # Use retry for transient database/network errors
             job = retry_sync(
                 self._client.fetch_next_job,
                 self.HANDLED_TYPES,
                 max_attempts=3,
                 base_delay=1.0,
-                retryable_exceptions=(httpx.HTTPError, httpx.TimeoutException),
+                retryable_exceptions=(httpx.ConnectError, httpx.TimeoutException),
             )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code in (401, 403):
+                logger.error(
+                    "Supabase auth failed (%s) — check SUPABASE_SERVICE_ROLE",
+                    exc.response.status_code,
+                )
+            else:
+                logger.error("Failed to fetch next job: HTTP %s", exc.response.status_code)
+            return None
         except httpx.HTTPError as exc:
             logger.error("Failed to fetch next job after retries: %s", exc)
             return None
@@ -85,8 +111,19 @@ class UnifiedWorker:
                 job["id"],
                 max_attempts=3,
                 base_delay=0.5,
-                retryable_exceptions=(httpx.HTTPError, httpx.TimeoutException),
+                retryable_exceptions=(httpx.ConnectError, httpx.TimeoutException),
             )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code in (401, 403):
+                logger.error(
+                    "Supabase auth failed (%s) — check SUPABASE_SERVICE_ROLE",
+                    exc.response.status_code,
+                )
+            else:
+                logger.error(
+                    "Failed to claim job %s: HTTP %s", job["id"], exc.response.status_code
+                )
+            return None
         except httpx.HTTPError as exc:
             logger.error("Failed to claim job %s after retries: %s", job["id"], exc)
             return None

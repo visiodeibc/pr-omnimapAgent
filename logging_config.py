@@ -84,6 +84,30 @@ class LocalFormatter(logging.Formatter):
         "CRITICAL": "\033[35m",  # Magenta
     }
     RESET = "\033[0m"
+    RESERVED_FIELDS = {
+        "name",
+        "msg",
+        "args",
+        "created",
+        "filename",
+        "funcName",
+        "levelname",
+        "levelno",
+        "lineno",
+        "module",
+        "msecs",
+        "pathname",
+        "process",
+        "processName",
+        "relativeCreated",
+        "stack_info",
+        "exc_info",
+        "exc_text",
+        "thread",
+        "threadName",
+        "taskName",
+        "message",
+    }
 
     def format(self, record: logging.LogRecord) -> str:
         # Add color to level name in local mode
@@ -96,6 +120,17 @@ class LocalFormatter(logging.Formatter):
         # Build the log line
         message = record.getMessage()
         base = f"{timestamp} | {levelname} | {record.name:25} | {message}"
+
+        # Include structured extra fields (same behavior as JSON formatter)
+        extras: Dict[str, Any] = {}
+        for key, value in record.__dict__.items():
+            if key not in self.RESERVED_FIELDS:
+                extras[key] = value
+        if extras:
+            if json is not None:
+                base += f" | extra={json.dumps(extras, default=str)}"
+            else:
+                base += f" | extra={extras}"
 
         # Add exception info if present
         if record.exc_info:

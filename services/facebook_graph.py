@@ -14,7 +14,8 @@ from utils.retry import retry_async
 logger = get_logger(__name__)
 
 DEFAULT_LOGIN_SCOPES = (
-    "pages_show_list,pages_read_engagement,pages_manage_metadata,instagram_manage_messages"
+    "pages_show_list,pages_read_engagement,pages_manage_metadata,"
+    "instagram_business_basic,instagram_business_manage_messages"
 )
 DEFAULT_GRAPH_API_VERSION = "v24.0"
 

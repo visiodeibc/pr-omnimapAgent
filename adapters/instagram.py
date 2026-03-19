@@ -13,6 +13,8 @@ Setup requirements:
 
 import hashlib
 import hmac
+import json
+from collections import Counter
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
@@ -33,7 +35,41 @@ from logging_config import get_logger
 logger = get_logger(__name__)
 
 # Instagram Graph API base URL
-GRAPH_API_URL = "https://graph.facebook.com/v18.0"
+GRAPH_API_URL = "https://graph.facebook.com/v24.0"
+
+
+def _extract_graph_error(payload: str) -> Dict[str, Any]:
+    """Best-effort extraction of Graph API error payload."""
+    try:
+        data = json.loads(payload)
+    except Exception:
+        return {}
+    if isinstance(data, dict):
+        error = data.get("error")
+        return error if isinstance(error, dict) else {}
+    return {}
+
+
+def _is_valid_instagram_account_id(value: Optional[str]) -> bool:
+    if not value:
+        return False
+    return value.isdigit()
+
+
+def _mask_id(value: Optional[str]) -> str:
+    if not value:
+        return ""
+    return value[-4:]
+
+
+def _is_page_access_token(token: str) -> bool:
+    """Check whether a token looks like a Facebook Page Access Token.
+
+    IG-scoped tokens (``IGAA…``) are issued by the Instagram API and cannot
+    be used with the Graph API ``/messages`` endpoint which requires a Page
+    Access Token (typically starting with ``EAA…``).
+    """
+    return not token.startswith("IGAA")
 
 
 class InstagramAdapter(MessagingAdapter):
@@ -47,21 +83,24 @@ class InstagramAdapter(MessagingAdapter):
 
     def __init__(
         self,
-        access_token: str,
+        access_token: Optional[str] = None,
         app_secret: Optional[str] = None,
         instagram_account_id: Optional[str] = None,
+        access_token_map: Optional[Dict[str, str]] = None,
     ) -> None:
         """
         Initialize the Instagram adapter.
 
         Args:
-            access_token: Page access token with instagram_basic and instagram_manage_messages permissions.
+            access_token: Page access token with Instagram messaging permissions (optional if map provided).
             app_secret: App secret for webhook signature validation.
             instagram_account_id: Instagram account ID for sending messages.
+            access_token_map: Optional mapping of instagram_account_id -> access token.
         """
         self._access_token = access_token
         self._app_secret = app_secret
         self._instagram_account_id = instagram_account_id
+        self._access_token_map = access_token_map or {}
         self._client = httpx.AsyncClient(timeout=30.0)
 
     @property
@@ -85,8 +124,106 @@ class InstagramAdapter(MessagingAdapter):
     async def send_message(self, message: OutgoingMessage) -> MessageDeliveryResult:
         """Send a message to an Instagram user."""
         try:
+            metadata_token = (
+                message.metadata.get("instagram_access_token")
+                if isinstance(message.metadata, dict)
+                else None
+            )
+            metadata_account_id = (
+                message.metadata.get("instagram_account_id")
+                if isinstance(message.metadata, dict)
+                else None
+            )
+            instagram_account_id = metadata_account_id or self._instagram_account_id
+            account_id_source = (
+                "message.metadata.instagram_account_id"
+                if metadata_account_id
+                else "settings.instagram.account_id"
+            )
+
+            if not instagram_account_id:
+                return MessageDeliveryResult(
+                    success=False,
+                    error=(
+                        "Instagram account ID is missing. "
+                        "Provide instagram_account_id from webhook recipient.id or set INSTAGRAM_ACCOUNT_ID."
+                    ),
+                    error_code="MISSING_ACCOUNT_ID",
+                )
+
+            if not _is_valid_instagram_account_id(instagram_account_id):
+                logger.error(
+                    "Invalid Instagram account ID format: source=%s id_suffix=%s",
+                    account_id_source,
+                    _mask_id(instagram_account_id),
+                )
+                return MessageDeliveryResult(
+                    success=False,
+                    error=(
+                        "Instagram account ID is malformed. "
+                        "Expected a numeric Instagram business account ID."
+                    ),
+                    error_code="INVALID_ACCOUNT_ID",
+                )
+
+            if message.chat_id and instagram_account_id == message.chat_id:
+                logger.error(
+                    "Instagram account ID matches recipient ID: source=%s id_suffix=%s",
+                    account_id_source,
+                    _mask_id(instagram_account_id),
+                )
+                return MessageDeliveryResult(
+                    success=False,
+                    error=(
+                        "Instagram account ID appears to be the recipient scoped user ID. "
+                        "Use the Instagram business account ID (recipient.id from webhook)."
+                    ),
+                    error_code="INVALID_ACCOUNT_ID",
+                )
+
+            if not metadata_account_id:
+                logger.warning(
+                    "Instagram account ID not provided in message metadata; using configured ID: %s",
+                    _mask_id(instagram_account_id),
+                )
+
+            access_token = (
+                str(metadata_token).strip()
+                if metadata_token
+                else self._access_token_map.get(str(instagram_account_id))
+                or (str(self._access_token).strip() if self._access_token else None)
+            )
+            if not access_token:
+                return MessageDeliveryResult(
+                    success=False,
+                    error=(
+                        "Instagram access token is missing. "
+                        "Provide INSTAGRAM_ACCESS_TOKEN or INSTAGRAM_ACCESS_TOKEN_MAP for this account."
+                    ),
+                    error_code="MISSING_ACCESS_TOKEN",
+                )
+
+            if not _is_page_access_token(access_token):
+                logger.error(
+                    "Token for account %s is an IG-scoped token (IGAA…), "
+                    "not a Page Access Token. The Graph API /messages endpoint "
+                    "requires a Page Access Token (EAA…).",
+                    _mask_id(instagram_account_id),
+                )
+                return MessageDeliveryResult(
+                    success=False,
+                    error=(
+                        "The access token for this Instagram account is an IG-scoped token "
+                        "(starts with IGAA). The Graph API messaging endpoint requires a "
+                        "Facebook Page Access Token (starts with EAA). Update "
+                        "INSTAGRAM_ACCESS_TOKEN_MAP with the correct Page Access Token."
+                    ),
+                    error_code="WRONG_TOKEN_TYPE",
+                )
+
             # Build the message payload
             payload: Dict[str, Any] = {
+                "messaging_type": "RESPONSE",
                 "recipient": {"id": message.chat_id},
                 "message": {"text": message.text},
             }
@@ -104,8 +241,8 @@ class InstagramAdapter(MessagingAdapter):
                     payload["message"]["quick_replies"] = quick_replies
 
             # Send via Graph API
-            url = f"{GRAPH_API_URL}/{self._instagram_account_id}/messages"
-            params = {"access_token": self._access_token}
+            url = f"{GRAPH_API_URL}/{instagram_account_id}/messages"
+            params = {"access_token": access_token}
 
             response = await self._client.post(url, params=params, json=payload)
             response.raise_for_status()
@@ -119,10 +256,46 @@ class InstagramAdapter(MessagingAdapter):
 
         except httpx.HTTPStatusError as exc:
             error_body = exc.response.text
-            logger.exception("Instagram API error: %s - %s", exc.response.status_code, error_body)
+            graph_error = _extract_graph_error(error_body)
+            graph_code = str(graph_error.get("code", ""))
+            graph_type = str(graph_error.get("type", ""))
+            graph_message = str(graph_error.get("message", "")) or error_body
+
+            # Never include query string in logs (contains access_token).
+            request_url = str(exc.request.url)
+            safe_request_url = request_url.split("?", 1)[0]
+            logger.error(
+                "Instagram API error: status=%s code=%s type=%s message=%s url=%s",
+                exc.response.status_code,
+                graph_code or "unknown",
+                graph_type or "unknown",
+                graph_message,
+                safe_request_url,
+            )
+
+            if graph_code == "190":
+                return MessageDeliveryResult(
+                    success=False,
+                    error=(
+                        "Instagram access token is invalid or expired. "
+                        "Regenerate the Page Access Token via the Facebook OAuth flow "
+                        "and update INSTAGRAM_ACCESS_TOKEN / INSTAGRAM_ACCESS_TOKEN_MAP."
+                    ),
+                    error_code="INVALID_ACCESS_TOKEN",
+                )
+            if graph_code == "3":
+                return MessageDeliveryResult(
+                    success=False,
+                    error=(
+                        "Instagram messaging capability is not enabled for this app/account. "
+                        "Ensure the app has Instagram Messaging access (advanced/live as needed) "
+                        "and that the target account is allowed for the current app mode."
+                    ),
+                    error_code="INSTAGRAM_CAPABILITY_MISSING",
+                )
             return MessageDeliveryResult(
                 success=False,
-                error=f"HTTP {exc.response.status_code}: {error_body}",
+                error=f"HTTP {exc.response.status_code}: {graph_message}",
                 error_code=str(exc.response.status_code),
             )
         except Exception as exc:
@@ -132,81 +305,250 @@ class InstagramAdapter(MessagingAdapter):
                 error=str(exc),
             )
 
-    def parse_incoming(self, raw_payload: Dict[str, Any]) -> Optional[IncomingMessage]:
-        """Parse an Instagram webhook payload into an IncomingMessage."""
+    def parse_incoming_many(self, raw_payload: Dict[str, Any]) -> list[IncomingMessage]:
+        """
+        Parse an Instagram webhook payload into zero or more IncomingMessage values.
+
+        A single webhook request can include multiple message/postback events.
+        """
+        parsed_messages: list[IncomingMessage] = []
+
         try:
-            # Instagram webhooks follow the Messenger platform format
-            entry = raw_payload.get("entry", [])
-            if not entry:
-                return None
+            for msg_event in self._iter_events(raw_payload):
+                event_type = self._detect_event_type(msg_event)
 
-            for e in entry:
-                messaging = e.get("messaging", [])
-                for msg_event in messaging:
-                    # Skip non-message events (read receipts, typing indicators, etc.)
-                    message = msg_event.get("message")
-                    if not message:
-                        continue
+                if event_type == "message_echo":
+                    # Instagram includes message echoes under "message" subscription.
+                    # Skip them to avoid bot self-loop processing.
+                    continue
 
-                    sender = msg_event.get("sender", {})
-                    recipient = msg_event.get("recipient", {})
+                if event_type == "message":
+                    parsed = self._parse_message_event(msg_event, raw_payload)
+                    if parsed:
+                        parsed.metadata["event_type"] = event_type
+                        parsed_messages.append(parsed)
+                elif event_type == "postback":
+                    parsed = self._parse_postback_event(msg_event, raw_payload)
+                    if parsed:
+                        parsed.metadata["event_type"] = event_type
+                        parsed_messages.append(parsed)
 
-                    # Extract user info
-                    user = UserInfo(
-                        platform_user_id=str(sender.get("id", "")),
-                        metadata={"instagram_scoped_id": sender.get("id")},
-                    )
-
-                    # Extract chat info (for Instagram DM, chat_id is the sender ID)
-                    chat = ChatInfo(
-                        platform_chat_id=str(sender.get("id", "")),
-                        chat_type="private",
-                        metadata={"recipient_id": recipient.get("id")},
-                    )
-
-                    # Extract text
-                    text = message.get("text")
-
-                    # Extract media attachments
-                    media_urls = []
-                    media_type = None
-                    attachments = message.get("attachments", [])
-                    for att in attachments:
-                        att_type = att.get("type")
-                        payload = att.get("payload", {})
-                        if att_type == "image":
-                            media_type = "image"
-                            media_urls.append(payload.get("url", ""))
-                        elif att_type == "video":
-                            media_type = "video"
-                            media_urls.append(payload.get("url", ""))
-                        elif att_type == "audio":
-                            media_type = "audio"
-                            media_urls.append(payload.get("url", ""))
-
-                    # Extract timestamp
-                    timestamp = None
-                    ts = msg_event.get("timestamp")
-                    if ts:
-                        timestamp = datetime.fromtimestamp(ts / 1000, tz=timezone.utc)
-
-                    return IncomingMessage(
-                        platform=Platform.INSTAGRAM,
-                        message_id=message.get("mid", ""),
-                        user=user,
-                        chat=chat,
-                        text=text,
-                        timestamp=timestamp,
-                        media_urls=media_urls,
-                        media_type=media_type,
-                        raw_payload=raw_payload,
-                    )
-
-            return None
+            return parsed_messages
 
         except Exception as exc:
             logger.exception("Failed to parse Instagram message: %s", exc)
+            return []
+
+    def parse_incoming(self, raw_payload: Dict[str, Any]) -> Optional[IncomingMessage]:
+        """Parse first processable event from an Instagram webhook payload."""
+        parsed_messages = self.parse_incoming_many(raw_payload)
+        return parsed_messages[0] if parsed_messages else None
+
+    def summarize_webhook_events(self, raw_payload: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Summarize webhook events for observability and troubleshooting.
+
+        Returns event type counts and whether at least one processable
+        user message/postback exists in this payload.
+        """
+        event_types: Counter[str] = Counter()
+        processable_events = 0
+        event_sources: Counter[str] = Counter()
+
+        for msg_event in self._iter_events(raw_payload):
+            event_type = self._detect_event_type(msg_event)
+            event_types[event_type] += 1
+            if "message" in msg_event:
+                event_sources["messaging_or_change_message"] += 1
+            if "postback" in msg_event:
+                event_sources["postback"] += 1
+            if event_type in {"message", "postback"}:
+                processable_events += 1
+
+        return {
+            "event_type_counts": dict(event_types),
+            "processable_events": processable_events,
+            "has_processable_event": processable_events > 0,
+            "event_sources": dict(event_sources),
+        }
+
+    def _iter_events(self, raw_payload: Dict[str, Any]) -> list[Dict[str, Any]]:
+        """Collect messaging events from known Instagram webhook envelope shapes."""
+        events: list[Dict[str, Any]] = []
+        entry = raw_payload.get("entry", [])
+        if not isinstance(entry, list):
+            return events
+
+        for item in entry:
+            if not isinstance(item, dict):
+                continue
+
+            # Shape 1: entry[].messaging[]
+            messaging = item.get("messaging", [])
+            if isinstance(messaging, list):
+                for event in messaging:
+                    if isinstance(event, dict):
+                        events.append(event)
+
+            # Shape 2: entry[].changes[].value
+            changes = item.get("changes", [])
+            if isinstance(changes, list):
+                for change in changes:
+                    if not isinstance(change, dict):
+                        continue
+                    value = change.get("value")
+                    if isinstance(value, dict):
+                        events.append(value)
+
+        return events
+
+    def _detect_event_type(self, msg_event: Dict[str, Any]) -> str:
+        """Detect event type from Messenger-style webhook event object."""
+        message = msg_event.get("message")
+        if isinstance(message, dict):
+            if message.get("is_echo"):
+                return "message_echo"
+            return "message"
+
+        known_non_message_keys = (
+            "read",
+            "delivery",
+            "reaction",
+            "postback",
+            "referral",
+            "optin",
+            "standby",
+            "account_linking",
+            "request_thread_control",
+            "take_thread_control",
+            "pass_thread_control",
+        )
+        for key in known_non_message_keys:
+            if key in msg_event:
+                return key
+
+        return "unknown"
+
+    def _parse_message_event(
+        self, msg_event: Dict[str, Any], raw_payload: Dict[str, Any]
+    ) -> Optional[IncomingMessage]:
+        """Parse one message event regardless of webhook envelope shape."""
+        message = msg_event.get("message")
+        if not isinstance(message, dict):
             return None
+        if message.get("is_echo"):
+            return None
+
+        sender = msg_event.get("sender", {})
+        recipient = msg_event.get("recipient", {})
+
+        sender_id = str(sender.get("id", ""))
+        if not sender_id:
+            return None
+
+        user = UserInfo(
+            platform_user_id=sender_id,
+            metadata={"instagram_scoped_id": sender.get("id")},
+        )
+
+        chat = ChatInfo(
+            platform_chat_id=sender_id,
+            chat_type="private",
+            metadata={"recipient_id": recipient.get("id")},
+        )
+
+        text = message.get("text")
+
+        media_urls = []
+        media_type = None
+        attachments = message.get("attachments", [])
+        for att in attachments:
+            att_type = att.get("type")
+            payload = att.get("payload", {})
+            if att_type == "image":
+                media_type = "image"
+                media_urls.append(payload.get("url", ""))
+            elif att_type == "video":
+                media_type = "video"
+                media_urls.append(payload.get("url", ""))
+            elif att_type == "audio":
+                media_type = "audio"
+                media_urls.append(payload.get("url", ""))
+            elif att_type == "file":
+                media_type = "file"
+                media_urls.append(payload.get("url", ""))
+
+        # Ignore message events that have no user content.
+        if not text and not media_urls:
+            return None
+
+        timestamp = self._parse_timestamp(msg_event.get("timestamp"))
+
+        return IncomingMessage(
+            platform=Platform.INSTAGRAM,
+            message_id=message.get("mid", ""),
+            user=user,
+            chat=chat,
+            text=text,
+            timestamp=timestamp,
+            media_urls=media_urls,
+            media_type=media_type,
+            raw_payload=raw_payload,
+        )
+
+    def _parse_postback_event(
+        self, msg_event: Dict[str, Any], raw_payload: Dict[str, Any]
+    ) -> Optional[IncomingMessage]:
+        """Parse postback event into IncomingMessage."""
+        postback = msg_event.get("postback")
+        if not isinstance(postback, dict):
+            return None
+
+        sender = msg_event.get("sender", {})
+        recipient = msg_event.get("recipient", {})
+        sender_id = str(sender.get("id", ""))
+        if not sender_id:
+            return None
+
+        payload = postback.get("payload")
+        title = postback.get("title")
+        text = str(payload or title or "").strip()
+        if not text:
+            text = "[postback]"
+
+        timestamp = self._parse_timestamp(msg_event.get("timestamp"))
+
+        return IncomingMessage(
+            platform=Platform.INSTAGRAM,
+            message_id=str(postback.get("mid") or ""),
+            user=UserInfo(
+                platform_user_id=sender_id,
+                metadata={"instagram_scoped_id": sender.get("id")},
+            ),
+            chat=ChatInfo(
+                platform_chat_id=sender_id,
+                chat_type="private",
+                metadata={"recipient_id": recipient.get("id")},
+            ),
+            text=text,
+            timestamp=timestamp,
+            raw_payload=raw_payload,
+            metadata={"postback_payload": payload, "postback_title": title},
+        )
+
+    @staticmethod
+    def _parse_timestamp(raw_timestamp: Any) -> Optional[datetime]:
+        """Parse webhook timestamp in milliseconds, accepting str/int formats."""
+        if raw_timestamp in (None, ""):
+            return None
+
+        try:
+            timestamp_ms = int(raw_timestamp)
+        except (TypeError, ValueError):
+            logger.debug("Invalid Instagram timestamp value: %s", raw_timestamp)
+            return None
+
+        return datetime.fromtimestamp(timestamp_ms / 1000, tz=timezone.utc)
 
     def validate_webhook(self, headers: Dict[str, str], body: bytes) -> bool:
         """

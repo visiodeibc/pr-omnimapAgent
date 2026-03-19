@@ -112,13 +112,18 @@ async def retry_async(
         except Exception as exc:
             last_exception = exc
 
-            # Check if this is a retryable error
-            is_retryable = (
-                isinstance(exc, retryable_exceptions) or is_retryable_http_error(exc)
-            )
+            # HTTPStatusError must always be checked against the status code
+            # allowlist, even if the broader HTTPError base class is in
+            # retryable_exceptions.  This prevents retrying 401/403/etc.
+            if isinstance(exc, httpx.HTTPStatusError):
+                is_retryable = is_retryable_http_error(exc)
+            else:
+                is_retryable = (
+                    isinstance(exc, retryable_exceptions)
+                    or is_retryable_http_error(exc)
+                )
 
             if not is_retryable or attempt == max_attempts - 1:
-                # Not retryable or last attempt - re-raise
                 raise
 
             delay = calculate_backoff(attempt, base_delay, max_delay)
@@ -187,13 +192,15 @@ def retry_sync(
         except Exception as exc:
             last_exception = exc
 
-            # Check if this is a retryable error
-            is_retryable = (
-                isinstance(exc, retryable_exceptions) or is_retryable_http_error(exc)
-            )
+            if isinstance(exc, httpx.HTTPStatusError):
+                is_retryable = is_retryable_http_error(exc)
+            else:
+                is_retryable = (
+                    isinstance(exc, retryable_exceptions)
+                    or is_retryable_http_error(exc)
+                )
 
             if not is_retryable or attempt == max_attempts - 1:
-                # Not retryable or last attempt - re-raise
                 raise
 
             delay = calculate_backoff(attempt, base_delay, max_delay)

@@ -1,5 +1,6 @@
 import secrets
 import json
+import os
 import re
 from threading import Thread
 from typing import Any, Optional
@@ -120,7 +121,112 @@ def _build_callback_payload(
             (selected_page or {}).get("access_token", "")
         )
 
+    if "persisted" in payload:
+        query_payload["stored"] = "true" if payload.get("persisted") else "false"
+    if payload.get("persist_error"):
+        query_payload["store_error"] = str(payload.get("persist_error") or "")
+
+    subscribed_result = payload.get("subscribed_result")
+    if subscribed_result is not None:
+        success = (
+            subscribed_result.get("success")
+            if isinstance(subscribed_result, dict)
+            else None
+        )
+        if success is not None:
+            query_payload["subscribed"] = "true" if success else "false"
+
     return query_payload
+
+
+def _get_supabase_client() -> Optional[SupabaseRestClient]:
+    client = getattr(app.state, "supabase_client", None)
+    if client:
+        return client
+    if _bot_application and getattr(_bot_application, "bot_data", None):
+        client = _bot_application.bot_data.get("supabase_client")
+        if client:
+            return client
+    try:
+        settings = get_settings()
+        return SupabaseRestClient(settings.supabase_url, settings.supabase_key)
+    except Exception as exc:
+        logger.warning("Supabase client unavailable: %s", exc)
+        return None
+
+
+def _normalize_metadata(metadata: Any) -> dict[str, Any]:
+    if isinstance(metadata, dict):
+        return metadata
+    if isinstance(metadata, str) and metadata.strip():
+        try:
+            parsed = json.loads(metadata)
+            if isinstance(parsed, dict):
+                return parsed
+        except json.JSONDecodeError:
+            return {}
+    return {}
+
+
+def _persist_instagram_credentials(
+    supabase_client: SupabaseRestClient,
+    instagram_business_id: str,
+    page_id: str,
+    page_access_token: str,
+    page_name: Optional[str],
+    token_data: dict[str, Any],
+    subscribed_fields: Optional[str],
+    subscribed_result: Optional[dict[str, Any]],
+) -> None:
+    metadata: dict[str, Any] = {
+        "instagram_business_id": instagram_business_id,
+        "page_id": page_id,
+        "page_name": page_name,
+        "page_access_token": page_access_token,
+        "token_type": token_data.get("token_type"),
+        "expires_in": token_data.get("expires_in"),
+    }
+    if subscribed_fields:
+        metadata["subscribed_fields"] = subscribed_fields
+    if subscribed_result is not None:
+        metadata["subscribed_result"] = subscribed_result
+
+    existing = supabase_client.get_platform_account("instagram", instagram_business_id)
+    if existing:
+        update_payload: dict[str, Any] = {
+            "platform_metadata": metadata,
+            "platform_username": page_name or existing.get("platform_username"),
+            "is_verified": True,
+        }
+        supabase_client.update_platform_account(existing["id"], update_payload)
+        return
+
+    user = supabase_client.create_user(
+        display_name=page_name or f"Instagram {instagram_business_id}"
+    )
+    supabase_client.create_platform_account(
+        user_id=user["id"],
+        platform="instagram",
+        platform_user_id=instagram_business_id,
+        platform_username=page_name,
+        platform_metadata=metadata,
+        is_primary=True,
+    )
+
+
+def _lookup_instagram_access_token(
+    supabase_client: SupabaseRestClient,
+    instagram_account_id: str,
+) -> Optional[str]:
+    account = supabase_client.get_platform_account("instagram", instagram_account_id)
+    if not account:
+        return None
+    metadata = _normalize_metadata(account.get("platform_metadata"))
+    for key in ("page_access_token", "instagram_access_token", "access_token"):
+        token = metadata.get(key)
+        if isinstance(token, str) and token.strip():
+            return token.strip()
+    return None
 
 
 def _initialize_adapters(settings, bot: Optional[Any] = None) -> AdapterRegistry:
@@ -148,6 +254,7 @@ def _initialize_adapters(settings, bot: Optional[Any] = None) -> AdapterRegistry
             access_token=settings.instagram.access_token,
             app_secret=settings.instagram.app_secret,
             instagram_account_id=settings.instagram.account_id,
+            access_token_map=settings.instagram.access_token_map,
         )
         registry.register(instagram_adapter)
         logger.info("Registered Instagram adapter")
@@ -223,6 +330,7 @@ async def startup() -> None:
     # Store Supabase client in bot_data for handlers
     supabase_client = SupabaseRestClient(settings.supabase_url, settings.supabase_key)
     _bot_application.bot_data["supabase_client"] = supabase_client
+    app.state.supabase_client = supabase_client
 
     # Verify Supabase connectivity at startup
     if not await _verify_supabase_connectivity(supabase_client):
@@ -337,6 +445,65 @@ def _is_truthy(value: Optional[str]) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
+def _redact_payload(data: Any) -> Any:
+    """Redact sensitive fields from payloads before logging."""
+    sensitive_keys = {
+        "access_token",
+        "token",
+        "authorization",
+        "cookie",
+        "x-hub-signature-256",
+        "signature",
+        "secret",
+    }
+
+    if isinstance(data, dict):
+        redacted: dict[str, Any] = {}
+        for key, value in data.items():
+            key_lower = str(key).lower()
+            if key_lower in sensitive_keys or "token" in key_lower or "secret" in key_lower:
+                redacted[key] = "[REDACTED]"
+            else:
+                redacted[key] = _redact_payload(value)
+        return redacted
+
+    if isinstance(data, list):
+        return [_redact_payload(item) for item in data[:5]]
+
+    return data
+
+
+def _summarize_webhook_payload(data: dict[str, Any]) -> dict[str, Any]:
+    """Return compact payload metadata for observability."""
+    entry = data.get("entry", [])
+    first_entry = entry[0] if isinstance(entry, list) and entry else {}
+    messaging = first_entry.get("messaging", []) if isinstance(first_entry, dict) else []
+    changes = first_entry.get("changes", []) if isinstance(first_entry, dict) else []
+    first_messaging = messaging[0] if isinstance(messaging, list) and messaging else {}
+    first_change = changes[0] if isinstance(changes, list) and changes else {}
+    first_change_value = (
+        first_change.get("value", {}) if isinstance(first_change, dict) else {}
+    )
+
+    return {
+        "top_level_keys": sorted(data.keys()),
+        "object": data.get("object"),
+        "entry_count": len(entry) if isinstance(entry, list) else 0,
+        "first_entry_keys": sorted(first_entry.keys()) if isinstance(first_entry, dict) else [],
+        "messaging_count": len(messaging) if isinstance(messaging, list) else 0,
+        "first_messaging_keys": (
+            sorted(first_messaging.keys()) if isinstance(first_messaging, dict) else []
+        ),
+        "changes_count": len(changes) if isinstance(changes, list) else 0,
+        "first_change_field": (
+            first_change.get("field") if isinstance(first_change, dict) else None
+        ),
+        "first_change_value_keys": (
+            sorted(first_change_value.keys()) if isinstance(first_change_value, dict) else []
+        ),
+    }
+
+
 def _require_facebook_settings() -> tuple[Any, Any]:
     settings = get_settings()
     if not settings.facebook:
@@ -364,6 +531,7 @@ async def facebook_login(request: Request) -> RedirectResponse:
     return_to = request.query_params.get("return_to")
     requested_page_id = request.query_params.get("page_id")
     subscribe = _is_truthy(request.query_params.get("subscribe"))
+    persist = _is_truthy(request.query_params.get("persist"))
     include_page_tokens = _is_truthy(request.query_params.get("include_page_tokens"))
     subscribed_fields = request.query_params.get("subscribed_fields", "messages")
 
@@ -394,6 +562,7 @@ async def facebook_login(request: Request) -> RedirectResponse:
                 "return_to": return_to,
                 "page_id": requested_page_id,
                 "subscribe": subscribe,
+                "persist": persist,
                 "include_page_tokens": include_page_tokens,
                 "subscribed_fields": subscribed_fields,
             }
@@ -414,6 +583,7 @@ async def facebook_callback(request: Request) -> JSONResponse:
     Optional query params:
     - page_id: select a specific page
     - subscribe: true/false to call /subscribed_apps
+    - persist: true/false to store page tokens for Instagram replies
     - subscribed_fields: comma-separated fields (default: messages)
     - include_page_tokens: true/false to include page access tokens in response
     """
@@ -444,6 +614,11 @@ async def facebook_callback(request: Request) -> JSONResponse:
         if request.query_params.get("subscribe") is not None
         else str(flow_cookie.get("subscribe", "false"))
     )
+    persist = _is_truthy(
+        request.query_params.get("persist")
+        if request.query_params.get("persist") is not None
+        else str(flow_cookie.get("persist", "false"))
+    )
     subscribed_fields = request.query_params.get("subscribed_fields") or str(
         flow_cookie.get("subscribed_fields", "messages")
     )
@@ -456,6 +631,9 @@ async def facebook_callback(request: Request) -> JSONResponse:
 
     if subscribe and not page_id:
         raise HTTPException(status_code=400, detail="subscribe=true requires page_id")
+
+    persisted = False
+    persist_error: Optional[str] = None
 
     async with FacebookGraphClient(
         app_id=facebook.app_id,
@@ -499,6 +677,32 @@ async def facebook_callback(request: Request) -> JSONResponse:
                     page_access_token=selected_page.access_token,
                     subscribed_fields=subscribed_fields,
                 )
+            if persist:
+                if not instagram_business_id:
+                    persist_error = "Instagram business ID not found for selected page"
+                else:
+                    supabase_client = _get_supabase_client()
+                    if not supabase_client:
+                        persist_error = "Supabase client not available"
+                    else:
+                        try:
+                            _persist_instagram_credentials(
+                                supabase_client=supabase_client,
+                                instagram_business_id=str(instagram_business_id),
+                                page_id=str(selected_page.id),
+                                page_access_token=str(selected_page.access_token),
+                                page_name=selected_page.name,
+                                token_data=token_data,
+                                subscribed_fields=subscribed_fields if subscribe else None,
+                                subscribed_result=subscribed_result,
+                            )
+                            persisted = True
+                        except Exception as exc:
+                            persist_error = str(exc)
+                            logger.exception(
+                                "Failed to persist Instagram credentials for page %s",
+                                selected_page.id,
+                            )
         elif subscribe:
             raise HTTPException(
                 status_code=400,
@@ -515,6 +719,8 @@ async def facebook_callback(request: Request) -> JSONResponse:
             "instagram_business_id": instagram_business_id,
             "subscribed_fields": subscribed_fields if subscribe else None,
             "subscribed_result": subscribed_result,
+            "persisted": persisted,
+            "persist_error": persist_error,
         }
 
     if return_to and _is_allowed_return_url(str(return_to), facebook.allowed_return_urls):
@@ -673,7 +879,11 @@ async def _handle_telegram_message(
 
             # Flush debug logs to user in dev mode
             if debug_reporter.enabled:
-                await debug_reporter.flush()
+                should_flush_debug = (
+                    platform == Platform.TELEGRAM or len(response_errors) == 0
+                )
+                if should_flush_debug:
+                    await debug_reporter.flush()
 
             # Send response to user if handler provided a message
             # Use HTML parse_mode to support formatting like <b>bold</b>
@@ -754,107 +964,184 @@ async def _process_platform_webhook(
         Response dict with processing status
     """
     settings = get_settings()
-    incoming = adapter.parse_incoming(data)
+    platform_event_summary: dict[str, Any] = {}
+    summarize_events = getattr(adapter, "summarize_webhook_events", None)
+    if callable(summarize_events):
+        try:
+            platform_event_summary = summarize_events(data)
+        except Exception as exc:
+            logger.debug(
+                "Failed to summarize webhook events",
+                extra={"platform": platform.value, "error": str(exc)},
+            )
 
-    if not incoming:
+    parse_many = getattr(adapter, "parse_incoming_many", None)
+    if callable(parse_many):
+        incoming_messages = parse_many(data)
+    else:
+        single_incoming = adapter.parse_incoming(data)
+        incoming_messages = [single_incoming] if single_incoming else []
+
+    if not incoming_messages:
+        message = "Webhook payload contained non-message events"
+        if platform_event_summary.get("event_type_counts"):
+            message = "Webhook payload had no processable user message"
         logger.debug(
-            "Webhook payload was not a processable message",
-            extra={"platform": platform.value},
+            message,
+            extra={
+                "platform": platform.value,
+                "payload_summary": _summarize_webhook_payload(data),
+                "event_summary": platform_event_summary,
+            },
         )
         return {"status": "ok", "processed": False}
 
-    logger.info(
-        "Message received",
-        extra={
-            "platform": platform.value,
-            "user_id": incoming.user.platform_user_id,
-            "content_preview": incoming.text[:50] if incoming.text else "(media)",
-        },
-    )
+    processed_count = 0
+    response_sent_count = 0
+    response_errors: list[str] = []
+    last_content_type: Optional[str] = None
 
-    # Create debug reporter for development mode
-    debug_reporter = create_debug_reporter(
-        chat_id=incoming.chat.platform_chat_id,
-        platform=platform,
-        adapter_registry=get_adapter_registry(),
-        environment=settings.environment,
-    )
-
-    if debug_reporter.enabled:
-        debug_reporter.info("Message received", data={
-            "from": incoming.user.display_name,
-            "text": (incoming.text or "")[:100],
-        })
-
-    # Process through agent orchestrator if available
-    if _agent_orchestrator:
-        result = await _agent_orchestrator.process_incoming_message(
-            incoming,
-            debug_reporter=debug_reporter,
-        )
+    for incoming in incoming_messages:
         logger.info(
-            "Agent processed message",
+            "Message received",
             extra={
                 "platform": platform.value,
-                "handler": result.handler_name,
-                "content_type": result.content_type.value,
-                "success": result.success,
+                "user_id": incoming.user.platform_user_id,
+                "content_preview": incoming.text[:50] if incoming.text else "(media)",
             },
         )
 
-        # Send handler response back to the originating chat for non-Telegram webhooks.
-        # Telegram has its own update handler path, but this unified webhook path
-        # should mirror the same "process + reply" behavior for Instagram/TikTok.
-        response_sent = False
-        response_error = None
-        if result.message:
-            outbound_text = result.message
-            if platform != Platform.TELEGRAM:
-                # Non-Telegram platforms do not support Telegram HTML parse modes.
-                outbound_text = re.sub(r"<br\\s*/?>", "\n", outbound_text, flags=re.IGNORECASE)
-                outbound_text = re.sub(r"</p\\s*>", "\n\n", outbound_text, flags=re.IGNORECASE)
-                outbound_text = re.sub(r"<[^>]+>", "", outbound_text).strip()
+        # Create debug reporter for development mode
+        debug_reporter = create_debug_reporter(
+            chat_id=incoming.chat.platform_chat_id,
+            platform=platform,
+            adapter_registry=get_adapter_registry(),
+            environment=settings.environment,
+        )
 
-            delivery = await adapter.send_message(
-                OutgoingMessage(
-                    chat_id=incoming.chat.platform_chat_id,
-                    text=outbound_text,
-                    platform=platform,
-                )
-            )
-            response_sent = delivery.success
-            response_error = delivery.error
-
-            if not delivery.success:
-                logger.error(
-                    "Failed sending platform response",
-                    extra={
-                        "platform": platform.value,
-                        "chat_id": incoming.chat.platform_chat_id,
-                        "error": delivery.error,
-                    },
-                )
-
-        # Flush debug logs to user in dev mode
         if debug_reporter.enabled:
+            debug_reporter.info("Message received", data={
+                "from": incoming.user.display_name,
+                "text": (incoming.text or "")[:100],
+            })
+
+        # Process through agent orchestrator if available
+        if _agent_orchestrator:
+            result = await _agent_orchestrator.process_incoming_message(
+                incoming,
+                debug_reporter=debug_reporter,
+            )
+            processed_count += 1
+            last_content_type = result.content_type.value
+            logger.info(
+                "Agent processed message",
+                extra={
+                    "platform": platform.value,
+                    "handler": result.handler_name,
+                    "content_type": result.content_type.value,
+                    "success": result.success,
+                },
+            )
+
+            # Send handler response back to the originating chat for non-Telegram webhooks.
+            # Telegram has its own update handler path, but this unified webhook path
+            # should mirror the same "process + reply" behavior for Instagram/TikTok.
+            if result.message:
+                outbound_text = result.message
+                if platform != Platform.TELEGRAM:
+                    # Non-Telegram platforms do not support Telegram HTML parse modes.
+                    outbound_text = re.sub(r"<br\\s*/?>", "\n", outbound_text, flags=re.IGNORECASE)
+                    outbound_text = re.sub(r"</p\\s*>", "\n\n", outbound_text, flags=re.IGNORECASE)
+                    outbound_text = re.sub(r"<[^>]+>", "", outbound_text).strip()
+
+                if not outbound_text.strip():
+                    response_errors.append("Skipping empty response after formatting")
+                    logger.warning(
+                        "Skipping empty platform response",
+                        extra={
+                            "platform": platform.value,
+                            "chat_id": incoming.chat.platform_chat_id,
+                        },
+                    )
+                else:
+                    outbound_metadata: dict[str, Any] = {}
+                    if platform == Platform.INSTAGRAM:
+                        recipient_id = incoming.chat.metadata.get("recipient_id")
+                        if not recipient_id or not str(recipient_id).isdigit():
+                            response_errors.append(
+                                "Missing instagram_account_id from webhook recipient.id"
+                            )
+                            logger.error(
+                                "Missing or invalid Instagram recipient_id in webhook payload",
+                                extra={
+                                    "platform": platform.value,
+                                    "chat_id": incoming.chat.platform_chat_id,
+                                },
+                            )
+                        else:
+                            outbound_metadata["instagram_account_id"] = str(recipient_id)
+                            supabase_client = _get_supabase_client()
+                            if supabase_client:
+                                access_token = _lookup_instagram_access_token(
+                                    supabase_client, str(recipient_id)
+                                )
+                                if access_token:
+                                    outbound_metadata["instagram_access_token"] = access_token
+                                else:
+                                    logger.warning(
+                                        "No stored Instagram access token for account %s",
+                                        str(recipient_id)[-4:],
+                                    )
+
+                    if platform != Platform.INSTAGRAM or outbound_metadata.get("instagram_account_id"):
+                        delivery = await adapter.send_message(
+                            OutgoingMessage(
+                                chat_id=incoming.chat.platform_chat_id,
+                                text=outbound_text,
+                                platform=platform,
+                                metadata=outbound_metadata,
+                            )
+                        )
+
+                        if delivery.success:
+                            response_sent_count += 1
+                        elif delivery.error:
+                            response_errors.append(delivery.error)
+                            logger.error(
+                                "Failed sending platform response",
+                                extra={
+                                    "platform": platform.value,
+                                    "chat_id": incoming.chat.platform_chat_id,
+                                    "error": delivery.error,
+                                },
+                            )
+
+            # Flush debug logs to user in dev mode
+            if debug_reporter.enabled:
+                await debug_reporter.flush()
+
+            continue
+
+        # No orchestrator - just send debug info if in dev mode
+        if debug_reporter.enabled:
+            debug_reporter.warn("Agent orchestrator not available")
+            debug_reporter.info("Message echo", data={"text": incoming.text})
             await debug_reporter.flush()
 
-        return {
-            "status": "ok",
-            "processed": True,
-            "content_type": result.content_type.value,
-            "response_sent": response_sent,
-            "response_error": response_error,
-        }
+    if processed_count == 0:
+        logger.debug("Agent orchestrator not available, skipping processing")
+        return {"status": "ok", "processed": False}
 
-    # No orchestrator - just send debug info if in dev mode
-    if debug_reporter.enabled:
-        debug_reporter.warn("Agent orchestrator not available")
-        debug_reporter.info("Message echo", data={"text": incoming.text})
-        await debug_reporter.flush()
-
-    logger.debug("Agent orchestrator not available, skipping processing")
-    return {"status": "ok", "processed": False}
+    return {
+        "status": "ok",
+        "processed": True,
+        "processed_count": processed_count,
+        "content_type": last_content_type,
+        "response_sent": response_sent_count > 0,
+        "response_sent_count": response_sent_count,
+        "response_error": response_errors[0] if response_errors else None,
+        "response_errors": response_errors,
+    }
 
 
 # =============================================================================
@@ -912,6 +1199,28 @@ async def instagram_webhook(request: Request) -> dict[str, Any]:
 
     try:
         data = await request.json()
+        payload_summary = _summarize_webhook_payload(data)
+        logger.debug("Instagram webhook payload summary", extra=payload_summary)
+
+        summarize_events = getattr(adapter, "summarize_webhook_events", None)
+        if callable(summarize_events):
+            try:
+                logger.debug(
+                    "Instagram webhook event summary",
+                    extra=summarize_events(data),
+                )
+            except Exception as exc:
+                logger.debug(
+                    "Instagram webhook event summary unavailable",
+                    extra={"error": str(exc)},
+                )
+
+        if _is_truthy(os.getenv("LOG_WEBHOOK_PAYLOADS")):
+            logger.debug(
+                "Instagram webhook payload (redacted)",
+                extra={"payload": _redact_payload(data)},
+            )
+
         return await _process_platform_webhook(Platform.INSTAGRAM, adapter, data)
     except HTTPException:
         raise
