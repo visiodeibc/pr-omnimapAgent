@@ -1088,8 +1088,9 @@ async def _process_platform_webhook(
                                 if access_token:
                                     outbound_metadata["instagram_access_token"] = access_token
                                 else:
-                                    logger.warning(
-                                        "No stored Instagram access token for account %s",
+                                    logger.debug(
+                                        "No Supabase-stored token for Instagram account %s; "
+                                        "adapter will fall back to env-configured credentials",
                                         str(recipient_id)[-4:],
                                     )
 
