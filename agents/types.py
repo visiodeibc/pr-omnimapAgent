@@ -552,5 +552,6 @@ def build_conversation_response_prompt(
         )
 
     if platform_constraints:
+        return f"{base_prompt}\n\n{platform_constraints}"
 
     return base_prompt
