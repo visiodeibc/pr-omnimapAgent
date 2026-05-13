@@ -155,19 +155,6 @@ def _get_supabase_client() -> Optional[SupabaseRestClient]:
         return None
 
 
-def _normalize_metadata(metadata: Any) -> dict[str, Any]:
-    if isinstance(metadata, dict):
-        return metadata
-    if isinstance(metadata, str) and metadata.strip():
-        try:
-            parsed = json.loads(metadata)
-            if isinstance(parsed, dict):
-                return parsed
-        except json.JSONDecodeError:
-            return {}
-    return {}
-
-
 def _persist_instagram_credentials(
     supabase_client: SupabaseRestClient,
     instagram_business_id: str,
@@ -214,21 +201,6 @@ def _persist_instagram_credentials(
     )
 
 
-def _lookup_instagram_access_token(
-    supabase_client: SupabaseRestClient,
-    instagram_account_id: str,
-) -> Optional[str]:
-    account = supabase_client.get_platform_account("instagram", instagram_account_id)
-    if not account:
-        return None
-    metadata = _normalize_metadata(account.get("platform_metadata"))
-    for key in ("page_access_token", "instagram_access_token", "access_token"):
-        token = metadata.get(key)
-        if isinstance(token, str) and token.strip():
-            return token.strip()
-    return None
-
-
 def _initialize_adapters(settings, bot: Optional[Any] = None) -> AdapterRegistry:
     """
     Initialize and register all configured platform adapters.
@@ -254,7 +226,6 @@ def _initialize_adapters(settings, bot: Optional[Any] = None) -> AdapterRegistry
             access_token=settings.instagram.access_token,
             app_secret=settings.instagram.app_secret,
             instagram_account_id=settings.instagram.account_id,
-            access_token_map=settings.instagram.access_token_map,
         )
         registry.register(instagram_adapter)
         logger.info("Registered Instagram adapter")
@@ -1082,19 +1053,6 @@ async def _process_platform_webhook(
                             )
                         else:
                             outbound_metadata["instagram_account_id"] = str(recipient_id)
-                            supabase_client = _get_supabase_client()
-                            if supabase_client:
-                                access_token = _lookup_instagram_access_token(
-                                    supabase_client, str(recipient_id)
-                                )
-                                if access_token:
-                                    outbound_metadata["instagram_access_token"] = access_token
-                                else:
-                                    logger.debug(
-                                        "No Supabase-stored token for Instagram account %s; "
-                                        "adapter will fall back to env-configured credentials",
-                                        str(recipient_id)[-4:],
-                                    )
 
                     if platform != Platform.INSTAGRAM or outbound_metadata.get("instagram_account_id"):
                         delivery = await adapter.send_message(

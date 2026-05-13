@@ -104,21 +104,18 @@ class InstagramAdapter(MessagingAdapter):
         access_token: Optional[str] = None,
         app_secret: Optional[str] = None,
         instagram_account_id: Optional[str] = None,
-        access_token_map: Optional[Dict[str, str]] = None,
     ) -> None:
         """
         Initialize the Instagram adapter.
 
         Args:
-            access_token: Page access token with Instagram messaging permissions (optional if map provided).
+            access_token: Page access token with Instagram messaging permissions.
             app_secret: App secret for webhook signature validation.
             instagram_account_id: Instagram account ID for sending messages.
-            access_token_map: Optional mapping of instagram_account_id -> access token.
         """
         self._access_token = access_token
         self._app_secret = app_secret
         self._instagram_account_id = instagram_account_id
-        self._access_token_map = access_token_map or {}
         self._client = httpx.AsyncClient(timeout=30.0)
 
     @property
@@ -142,11 +139,6 @@ class InstagramAdapter(MessagingAdapter):
     async def send_message(self, message: OutgoingMessage) -> MessageDeliveryResult:
         """Send a message to an Instagram user."""
         try:
-            metadata_token = (
-                message.metadata.get("instagram_access_token")
-                if isinstance(message.metadata, dict)
-                else None
-            )
             metadata_account_id = (
                 message.metadata.get("instagram_account_id")
                 if isinstance(message.metadata, dict)
@@ -205,53 +197,22 @@ class InstagramAdapter(MessagingAdapter):
                     _mask_id(instagram_account_id),
                 )
 
-            token_candidates = [
-                ("message.metadata.instagram_access_token", str(metadata_token).strip())
-                if metadata_token
-                else None,
-                (
-                    "INSTAGRAM_ACCESS_TOKEN_MAP",
-                    str(self._access_token_map.get(str(instagram_account_id), "")).strip(),
-                ),
-                (
-                    "INSTAGRAM_ACCESS_TOKEN",
-                    str(self._access_token).strip() if self._access_token else "",
-                ),
-            ]
-            populated_candidates = [
-                (source, token)
-                for candidate in token_candidates
-                if candidate
-                for source, token in [candidate]
-                if token
-            ]
-            if not populated_candidates:
+            access_token = str(self._access_token).strip() if self._access_token else ""
+            if not access_token:
                 return MessageDeliveryResult(
                     success=False,
                     error=(
                         "Instagram access token is missing. "
-                        "Provide INSTAGRAM_ACCESS_TOKEN or INSTAGRAM_ACCESS_TOKEN_MAP for this account."
+                        "Set INSTAGRAM_ACCESS_TOKEN with a Facebook Page Access Token."
                     ),
                     error_code="MISSING_ACCESS_TOKEN",
                 )
-
-            access_token = None
-            access_token_source = None
-            ig_scoped_sources: list[str] = []
-            for source, candidate in populated_candidates:
-                if _is_page_access_token(candidate):
-                    access_token = candidate
-                    access_token_source = source
-                    break
-                ig_scoped_sources.append(source)
-
-            if not access_token:
+            if not _is_page_access_token(access_token):
                 logger.error(
-                    "Token for account %s is an IG-scoped token (IGAA…) from %s, "
+                    "Token for account %s is an IG-scoped token (IGAA…), "
                     "not a Page Access Token. The Graph API /messages endpoint "
                     "requires a Page Access Token (EAA…).",
                     _mask_id(instagram_account_id),
-                    ",".join(ig_scoped_sources) or "unknown",
                 )
                 return MessageDeliveryResult(
                     success=False,
@@ -259,16 +220,9 @@ class InstagramAdapter(MessagingAdapter):
                         "The access token for this Instagram account is an IG-scoped token "
                         "(starts with IGAA). The Graph API messaging endpoint requires a "
                         "Facebook Page Access Token (starts with EAA). Update "
-                        "INSTAGRAM_ACCESS_TOKEN_MAP with the correct Page Access Token."
+                        "INSTAGRAM_ACCESS_TOKEN with the correct Page Access Token."
                     ),
                     error_code="WRONG_TOKEN_TYPE",
-                )
-            if ig_scoped_sources:
-                logger.warning(
-                    "Ignored IG-scoped token(s) for account %s from %s; using token from %s",
-                    _mask_id(instagram_account_id),
-                    ",".join(ig_scoped_sources),
-                    access_token_source,
                 )
 
             message_text, was_truncated = _truncate_instagram_text(message.text)
@@ -324,12 +278,14 @@ class InstagramAdapter(MessagingAdapter):
                         and graph_code == "100"
                         and "Object with ID 'me'" in graph_message
                     )
-                    log_method = (
-                        logger.warning
-                        if should_retry_with_account_endpoint
-                        else logger.error
-                    )
-                    log_method(
+                    if should_retry_with_account_endpoint:
+                        logger.debug(
+                            "Instagram API /me/messages unsupported for account %s; "
+                            "retrying account-scoped endpoint",
+                            _mask_id(instagram_account_id),
+                        )
+                        continue
+                    logger.error(
                         "Instagram API error: status=%s code=%s type=%s message=%s url=%s",
                         exc.response.status_code,
                         graph_code or "unknown",
@@ -337,9 +293,6 @@ class InstagramAdapter(MessagingAdapter):
                         graph_message,
                         safe_request_url,
                     )
-
-                    if should_retry_with_account_endpoint:
-                        continue
                     raise
 
                 data = response.json()
@@ -373,8 +326,8 @@ class InstagramAdapter(MessagingAdapter):
                     success=False,
                     error=(
                         "Instagram access token is invalid or expired. "
-                        "Regenerate the Page Access Token via the Facebook OAuth flow "
-                        "and update INSTAGRAM_ACCESS_TOKEN / INSTAGRAM_ACCESS_TOKEN_MAP."
+                        "Regenerate the Page Access Token via the Facebook OAuth flow and "
+                        "update INSTAGRAM_ACCESS_TOKEN."
                     ),
                     error_code="INVALID_ACCESS_TOKEN",
                 )
@@ -404,8 +357,7 @@ class InstagramAdapter(MessagingAdapter):
                     error=(
                         "The current token cannot send via /me/messages for this account. "
                         "Use the Page Access Token from the connected Facebook Page and ensure "
-                        "it is mapped to the Instagram business account in "
-                        "INSTAGRAM_ACCESS_TOKEN_MAP."
+                        "INSTAGRAM_ACCESS_TOKEN is that Page Access Token."
                     ),
                     error_code="UNSUPPORTED_ME_ENDPOINT",
                 )

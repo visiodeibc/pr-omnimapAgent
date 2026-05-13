@@ -85,8 +85,6 @@ INSTAGRAM_ACCESS_TOKEN=your_page_access_token
 INSTAGRAM_APP_SECRET=your_app_secret
 INSTAGRAM_ACCOUNT_ID=your_account_id
 INSTAGRAM_VERIFY_TOKEN=your_verify_token
-# Optional: per-account token map (JSON object)
-# INSTAGRAM_ACCESS_TOKEN_MAP={"17841467615207225":"EAAG..."}
 
 # TikTok (optional)
 TIKTOK_CLIENT_KEY=your_client_key
