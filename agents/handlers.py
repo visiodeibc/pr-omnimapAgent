@@ -243,7 +243,10 @@ async def handle_conversation(
         )
 
     # Build the system prompt with or without context
-    system_prompt = build_conversation_response_prompt(context_string)
+    system_prompt = build_conversation_response_prompt(
+        context_string,
+        platform=request.platform,
+    )
 
     # Generate contextual response using OpenAI
     try:

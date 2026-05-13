@@ -517,7 +517,22 @@ IMPORTANT - Formatting rules:
 Remember: You help users extract and discover places from social media content."""
 
 
-def build_conversation_response_prompt(conversation_history: str) -> str:
+def _build_platform_response_constraints(platform: Optional[str]) -> str:
+    """Build platform-specific response constraints for generation prompts."""
+    if (platform or "").lower() != "instagram":
+        return ""
+
+    return """PLATFORM CONSTRAINTS (Instagram):
+- Keep the entire reply under 900 UTF-8 bytes to stay below Instagram hard limits
+- Never exceed 1000 UTF-8 bytes total
+- Prefer short sentences and avoid long enumerations
+- Avoid unnecessary emojis or verbose formatting"""
+
+
+def build_conversation_response_prompt(
+    conversation_history: str,
+    platform: Optional[str] = None,
+) -> str:
     """
     Build a system prompt for generating responses to conversation messages.
 
@@ -527,9 +542,15 @@ def build_conversation_response_prompt(conversation_history: str) -> str:
     Returns:
         Complete system prompt for conversation response generation
     """
-    if not conversation_history:
-        return CONVERSATION_RESPONSE_SYSTEM_PROMPT
+    platform_constraints = _build_platform_response_constraints(platform)
 
-    return CONVERSATION_RESPONSE_WITH_CONTEXT_TEMPLATE.format(
-        conversation_history=conversation_history
-    )
+    if not conversation_history:
+        base_prompt = CONVERSATION_RESPONSE_SYSTEM_PROMPT
+    else:
+        base_prompt = CONVERSATION_RESPONSE_WITH_CONTEXT_TEMPLATE.format(
+            conversation_history=conversation_history
+        )
+
+    if platform_constraints:
+
+    return base_prompt

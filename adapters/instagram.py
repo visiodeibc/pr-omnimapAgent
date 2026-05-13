@@ -72,6 +72,24 @@ def _is_page_access_token(token: str) -> bool:
     return not token.startswith("IGAA")
 
 
+def _truncate_instagram_text(text: str, max_bytes: int = 1000) -> tuple[str, bool]:
+    """Ensure outbound text respects Instagram's 1000-byte UTF-8 limit."""
+    encoded = text.encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return text, False
+
+    ellipsis = "..."
+    budget = max(0, max_bytes - len(ellipsis.encode("utf-8")))
+    truncated = encoded[:budget].decode("utf-8", errors="ignore").rstrip()
+    candidate = f"{truncated}{ellipsis}" if truncated else ellipsis[:max_bytes]
+
+    while len(candidate.encode("utf-8")) > max_bytes and truncated:
+        truncated = truncated[:-1].rstrip()
+        candidate = f"{truncated}{ellipsis}" if truncated else ellipsis[:max_bytes]
+
+    return candidate, True
+
+
 class InstagramAdapter(MessagingAdapter):
     """
     Instagram Messaging adapter using Meta Graph API.
@@ -187,13 +205,27 @@ class InstagramAdapter(MessagingAdapter):
                     _mask_id(instagram_account_id),
                 )
 
-            access_token = (
-                str(metadata_token).strip()
+            token_candidates = [
+                ("message.metadata.instagram_access_token", str(metadata_token).strip())
                 if metadata_token
-                else self._access_token_map.get(str(instagram_account_id))
-                or (str(self._access_token).strip() if self._access_token else None)
-            )
-            if not access_token:
+                else None,
+                (
+                    "INSTAGRAM_ACCESS_TOKEN_MAP",
+                    str(self._access_token_map.get(str(instagram_account_id), "")).strip(),
+                ),
+                (
+                    "INSTAGRAM_ACCESS_TOKEN",
+                    str(self._access_token).strip() if self._access_token else "",
+                ),
+            ]
+            populated_candidates = [
+                (source, token)
+                for candidate in token_candidates
+                if candidate
+                for source, token in [candidate]
+                if token
+            ]
+            if not populated_candidates:
                 return MessageDeliveryResult(
                     success=False,
                     error=(
@@ -203,12 +235,23 @@ class InstagramAdapter(MessagingAdapter):
                     error_code="MISSING_ACCESS_TOKEN",
                 )
 
-            if not _is_page_access_token(access_token):
+            access_token = None
+            access_token_source = None
+            ig_scoped_sources: list[str] = []
+            for source, candidate in populated_candidates:
+                if _is_page_access_token(candidate):
+                    access_token = candidate
+                    access_token_source = source
+                    break
+                ig_scoped_sources.append(source)
+
+            if not access_token:
                 logger.error(
-                    "Token for account %s is an IG-scoped token (IGAA…), "
+                    "Token for account %s is an IG-scoped token (IGAA…) from %s, "
                     "not a Page Access Token. The Graph API /messages endpoint "
                     "requires a Page Access Token (EAA…).",
                     _mask_id(instagram_account_id),
+                    ",".join(ig_scoped_sources) or "unknown",
                 )
                 return MessageDeliveryResult(
                     success=False,
@@ -220,12 +263,28 @@ class InstagramAdapter(MessagingAdapter):
                     ),
                     error_code="WRONG_TOKEN_TYPE",
                 )
+            if ig_scoped_sources:
+                logger.warning(
+                    "Ignored IG-scoped token(s) for account %s from %s; using token from %s",
+                    _mask_id(instagram_account_id),
+                    ",".join(ig_scoped_sources),
+                    access_token_source,
+                )
+
+            message_text, was_truncated = _truncate_instagram_text(message.text)
+            if was_truncated:
+                logger.warning(
+                    "Instagram text exceeded byte limit; message truncated: original_bytes=%s truncated_bytes=%s recipient_suffix=%s",
+                    len(message.text.encode("utf-8")),
+                    len(message_text.encode("utf-8")),
+                    _mask_id(message.chat_id),
+                )
 
             # Build the message payload
             payload: Dict[str, Any] = {
                 "messaging_type": "RESPONSE",
                 "recipient": {"id": message.chat_id},
-                "message": {"text": message.text},
+                "message": {"text": message_text},
             }
 
             # Add quick reply buttons if provided
@@ -240,8 +299,9 @@ class InstagramAdapter(MessagingAdapter):
                 if quick_replies:
                     payload["message"]["quick_replies"] = quick_replies
 
-            # Send via Graph API
-            url = f"{GRAPH_API_URL}/{instagram_account_id}/messages"
+            # Send via Messenger Platform endpoint.
+            # For IG Messaging with Page Access Tokens, Meta expects /me/messages.
+            url = f"{GRAPH_API_URL}/me/messages"
             params = {"access_token": access_token}
 
             response = await self._client.post(url, params=params, json=payload)
