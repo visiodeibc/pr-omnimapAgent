@@ -302,6 +302,7 @@ def create_debug_reporter(
     platform: "Platform",
     adapter_registry: "AdapterRegistry",
     environment: str,
+    enabled_override: Optional[bool] = None,
 ) -> DebugReporter:
     """
     Factory function to create a DebugReporter.
@@ -317,7 +318,11 @@ def create_debug_reporter(
     Returns:
         Configured DebugReporter instance
     """
-    enabled = environment not in ("production", "prod")
+    enabled = (
+        enabled_override
+        if enabled_override is not None
+        else environment not in ("production", "prod")
+    )
 
     return DebugReporter(
         chat_id=chat_id,

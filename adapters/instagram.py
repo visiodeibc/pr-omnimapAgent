@@ -299,20 +299,55 @@ class InstagramAdapter(MessagingAdapter):
                 if quick_replies:
                     payload["message"]["quick_replies"] = quick_replies
 
-            # Send via Messenger Platform endpoint.
-            # For IG Messaging with Page Access Tokens, Meta expects /me/messages.
-            url = f"{GRAPH_API_URL}/me/messages"
             params = {"access_token": access_token}
+            endpoint_attempts = [
+                ("me", f"{GRAPH_API_URL}/me/messages"),
+                ("account", f"{GRAPH_API_URL}/{instagram_account_id}/messages"),
+            ]
 
-            response = await self._client.post(url, params=params, json=payload)
-            response.raise_for_status()
-            data = response.json()
+            for endpoint_kind, url in endpoint_attempts:
+                response = await self._client.post(url, params=params, json=payload)
+                try:
+                    response.raise_for_status()
+                except httpx.HTTPStatusError as exc:
+                    error_body = exc.response.text
+                    graph_error = _extract_graph_error(error_body)
+                    graph_code = str(graph_error.get("code", ""))
+                    graph_type = str(graph_error.get("type", ""))
+                    graph_message = str(graph_error.get("message", "")) or error_body
 
-            return MessageDeliveryResult(
-                success=True,
-                message_id=data.get("message_id"),
-                metadata={"recipient_id": data.get("recipient_id")},
-            )
+                    # Never include query string in logs (contains access_token).
+                    request_url = str(exc.request.url)
+                    safe_request_url = request_url.split("?", 1)[0]
+                    should_retry_with_account_endpoint = (
+                        endpoint_kind == "me"
+                        and graph_code == "100"
+                        and "Object with ID 'me'" in graph_message
+                    )
+                    log_method = (
+                        logger.warning
+                        if should_retry_with_account_endpoint
+                        else logger.error
+                    )
+                    log_method(
+                        "Instagram API error: status=%s code=%s type=%s message=%s url=%s",
+                        exc.response.status_code,
+                        graph_code or "unknown",
+                        graph_type or "unknown",
+                        graph_message,
+                        safe_request_url,
+                    )
+
+                    if should_retry_with_account_endpoint:
+                        continue
+                    raise
+
+                data = response.json()
+                return MessageDeliveryResult(
+                    success=True,
+                    message_id=data.get("message_id"),
+                    metadata={"recipient_id": data.get("recipient_id")},
+                )
 
         except httpx.HTTPStatusError as exc:
             error_body = exc.response.text
@@ -352,6 +387,27 @@ class InstagramAdapter(MessagingAdapter):
                         "and that the target account is allowed for the current app mode."
                     ),
                     error_code="INSTAGRAM_CAPABILITY_MISSING",
+                )
+            if graph_code == "230":
+                return MessageDeliveryResult(
+                    success=False,
+                    error=(
+                        "The access token is missing Messenger permissions for this Page "
+                        "(pages_messaging). Reconnect Facebook/Instagram via OAuth and ensure "
+                        "the selected Page has messaging permissions enabled."
+                    ),
+                    error_code="MISSING_MESSAGING_PERMISSION",
+                )
+            if graph_code == "100" and "Object with ID 'me'" in graph_message:
+                return MessageDeliveryResult(
+                    success=False,
+                    error=(
+                        "The current token cannot send via /me/messages for this account. "
+                        "Use the Page Access Token from the connected Facebook Page and ensure "
+                        "it is mapped to the Instagram business account in "
+                        "INSTAGRAM_ACCESS_TOKEN_MAP."
+                    ),
+                    error_code="UNSUPPORTED_ME_ENDPOINT",
                 )
             return MessageDeliveryResult(
                 success=False,

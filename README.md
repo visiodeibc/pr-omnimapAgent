@@ -75,6 +75,10 @@ PUBLIC_URL=https://your-domain.com
 # Optional
 PYTHON_WORKER_POLL_INTERVAL=5
 PYTHON_WORKER_ENABLED=true
+ENVIRONMENT=local
+LOG_LEVEL=INFO
+# Force-enable/disable in-chat debug reports (default: enabled outside production)
+# DEBUG_REPORTER_ENABLED=false
 
 # Instagram (optional)
 INSTAGRAM_ACCESS_TOKEN=your_page_access_token
@@ -92,7 +96,7 @@ TIKTOK_CLIENT_SECRET=your_client_secret
 FACEBOOK_APP_ID=your_facebook_app_id
 FACEBOOK_APP_SECRET=your_facebook_app_secret
 FACEBOOK_REDIRECT_URI=https://your-backend-domain.com/auth/facebook/callback
-FACEBOOK_LOGIN_SCOPES=pages_show_list,pages_read_engagement,pages_manage_metadata,instagram_manage_messages,instagram_business_manage_messages
+FACEBOOK_LOGIN_SCOPES=pages_show_list,pages_read_engagement,pages_manage_metadata,pages_messaging,instagram_manage_messages,instagram_business_manage_messages
 FACEBOOK_GRAPH_API_VERSION=v24.0
 FACEBOOK_ALLOWED_RETURN_URLS=https://your-frontend-domain.com/auth/facebook/connect,http://localhost:3000/auth/facebook/connect
 ```

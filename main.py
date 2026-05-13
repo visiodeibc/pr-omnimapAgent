@@ -845,6 +845,7 @@ async def _handle_telegram_message(
         platform=Platform.TELEGRAM,
         adapter_registry=registry,
         environment=settings.environment,
+        enabled_override=settings.debug_reporter_enabled,
     )
 
     if debug_reporter.enabled:
@@ -1017,6 +1018,7 @@ async def _process_platform_webhook(
             platform=platform,
             adapter_registry=get_adapter_registry(),
             environment=settings.environment,
+            enabled_override=settings.debug_reporter_enabled,
         )
 
         if debug_reporter.enabled:

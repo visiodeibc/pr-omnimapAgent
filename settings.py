@@ -77,6 +77,7 @@ class Settings:
 
     # Environment
     environment: str = "local"  # local, staging, production
+    debug_reporter_enabled: bool = True
 
     # OpenAI settings for agentic workflow
     openai: Optional[OpenAISettings] = None
@@ -137,6 +138,17 @@ def get_settings() -> Settings:
     enable_worker = os.getenv("PYTHON_WORKER_ENABLED", "true").lower() not in {"0", "false", "no"}
     public_url = os.getenv("PUBLIC_URL")
     environment = get_environment()
+    debug_reporter_env = os.getenv("DEBUG_REPORTER_ENABLED")
+    if debug_reporter_env is None:
+        debug_reporter_enabled = environment not in ("production", "prod")
+    else:
+        debug_reporter_enabled = debug_reporter_env.strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "y",
+            "on",
+        }
 
     # Load Telegram settings (required for now, optional in future)
     telegram_settings = None
@@ -209,8 +221,8 @@ def get_settings() -> Settings:
     facebook_redirect_uri = os.getenv("FACEBOOK_REDIRECT_URI")
     facebook_scopes = os.getenv(
         "FACEBOOK_LOGIN_SCOPES",
-        "pages_show_list,pages_read_engagement,pages_manage_metadata,"
-        "instagram_business_basic,instagram_business_manage_messages",
+        "pages_show_list,pages_read_engagement,pages_manage_metadata,pages_messaging,"
+        "instagram_manage_messages,instagram_business_basic,instagram_business_manage_messages",
     )
     facebook_graph_version = os.getenv("FACEBOOK_GRAPH_API_VERSION", "v24.0")
     facebook_allowed_return_urls = tuple(
@@ -277,6 +289,7 @@ def get_settings() -> Settings:
         enable_worker=enable_worker,
         public_url=public_url,
         environment=environment,
+        debug_reporter_enabled=debug_reporter_enabled,
         openai=openai_settings,
         telegram=telegram_settings,
         instagram=instagram_settings,
