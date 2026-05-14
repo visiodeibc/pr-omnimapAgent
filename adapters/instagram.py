@@ -270,9 +270,6 @@ class InstagramAdapter(MessagingAdapter):
                     graph_type = str(graph_error.get("type", ""))
                     graph_message = str(graph_error.get("message", "")) or error_body
 
-                    # Never include query string in logs (contains access_token).
-                    request_url = str(exc.request.url)
-                    safe_request_url = request_url.split("?", 1)[0]
                     should_retry_with_account_endpoint = (
                         endpoint_kind == "me"
                         and graph_code == "100"
@@ -285,14 +282,6 @@ class InstagramAdapter(MessagingAdapter):
                             _mask_id(instagram_account_id),
                         )
                         continue
-                    logger.error(
-                        "Instagram API error: status=%s code=%s type=%s message=%s url=%s",
-                        exc.response.status_code,
-                        graph_code or "unknown",
-                        graph_type or "unknown",
-                        graph_message,
-                        safe_request_url,
-                    )
                     raise
 
                 data = response.json()
