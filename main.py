@@ -851,11 +851,7 @@ async def _handle_telegram_message(
 
             # Flush debug logs to user in dev mode
             if debug_reporter.enabled:
-                should_flush_debug = (
-                    platform == Platform.TELEGRAM or len(response_errors) == 0
-                )
-                if should_flush_debug:
-                    await debug_reporter.flush()
+                await debug_reporter.flush()
 
             # Send response to user if handler provided a message
             # Use HTML parse_mode to support formatting like <b>bold</b>

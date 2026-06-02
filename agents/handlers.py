@@ -6,7 +6,7 @@ and returning a HandlerResult. These are stub implementations that log the
 processing and will be filled in with actual logic.
 """
 
-from typing import Optional
+from typing import Any, Dict, Optional
 
 from openai import AsyncOpenAI
 
@@ -19,6 +19,10 @@ from agents.types import (
 )
 from logging_config import get_logger
 from services.google_places import GooglePlacesService, PlaceSearchQuery
+from services.instagram_graph import (
+    InstagramGraphService,
+    canonicalize_permalink,
+)
 from services.memory import ConversationContext, MemoryService
 from settings import get_settings
 
@@ -331,75 +335,239 @@ async def handle_conversation(
         )
 
 
+def _resolve_instagram_target(
+    request: UnifiedRequest, extracted: ExtractedData
+) -> tuple[Optional[str], Optional[Dict[str, Any]]]:
+    """Pick the best IG URL to fetch metadata for.
+
+    Prefers a canonical permalink from a DM share attachment (set by the IG
+    adapter when the user shares a reel/post), falling back to whatever the
+    classifier extracted from text.
+    """
+    share = None
+    if isinstance(request.metadata, dict):
+        share = request.metadata.get("instagram_share")
+
+    candidates: list[str] = []
+    if isinstance(share, dict):
+        for key in ("url", "reel_video_url"):
+            value = share.get(key)
+            if isinstance(value, str) and value:
+                candidates.append(value)
+    if extracted.url:
+        candidates.append(extracted.url)
+    if request.raw_content:
+        candidates.append(request.raw_content)
+
+    for candidate in candidates:
+        permalink = canonicalize_permalink(candidate)
+        if permalink:
+            return permalink, share if isinstance(share, dict) else None
+
+    return None, share if isinstance(share, dict) else None
+
+
+async def _summarize_instagram_post(
+    post_info: Any,
+    settings: Any,
+) -> Optional[str]:
+    """Ask the LLM to summarize the IG post given its public metadata."""
+    if not settings.agent_enabled:
+        return None
+
+    title = (post_info.title or "").strip()
+    author = post_info.author_name or "unknown"
+    media_label = {"reel": "reel", "post": "post", "tv": "IGTV video"}.get(
+        post_info.media_type or "", "post"
+    )
+
+    user_content = (
+        f"Author: @{author}\n"
+        f"Type: Instagram {media_label}\n"
+        f"Permalink: {post_info.permalink}\n"
+        f"Caption: {title or '(no caption returned by oEmbed)'}\n"
+    )
+
+    system_prompt = (
+        "You are OmniMap. The user shared an Instagram post or reel. "
+        "Write a short, friendly summary (2-4 sentences) of what the post is "
+        "about based on the caption and author. If the caption is empty or "
+        "uninformative, say so briefly and suggest the user open the link. "
+        "If any place names appear, list them on a final line prefixed with "
+        "'Places mentioned:'. Do not invent details that are not in the caption."
+    )
+
+    try:
+        client = AsyncOpenAI(
+            api_key=settings.openai.api_key,
+            timeout=settings.openai.timeout,
+            max_retries=settings.openai.max_retries,
+        )
+        response = await client.chat.completions.create(
+            model=settings.openai.model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_content},
+            ],
+            max_tokens=400,
+            temperature=0.4,
+        )
+        return (response.choices[0].message.content or "").strip() or None
+    except Exception as exc:
+        logger.warning(
+            "OpenAI summary for Instagram post failed",
+            extra={"error": str(exc), "permalink": post_info.permalink},
+        )
+        return None
+
+
 async def handle_instagram_link(
     request: UnifiedRequest,
     extracted: ExtractedData,
     session_id: Optional[str] = None,
 ) -> HandlerResult:
-    """
-    Handle messages containing Instagram links.
+    """Fetch Instagram post/reel metadata and reply with a summary."""
+    permalink, share = _resolve_instagram_target(request, extracted)
 
-    This handler will:
-    1. Fetch the Instagram post/reel content
-    2. Extract place mentions from caption/comments
-    3. Process any location tags
-    4. Queue place extraction jobs
-
-    Args:
-        request: The unified incoming request
-        extracted: Extracted data from classification
-        session_id: Optional session ID for context
-
-    Returns:
-        HandlerResult with processing outcome
-    """
     logger.info(
         "📸 [INSTAGRAM_LINK] Processing Instagram link request",
         extra={
             "platform": request.platform,
             "user_id": request.platform_user_id,
             "url": extracted.url,
-            "content_id": extracted.link_content_id,
-            "ig_username": extracted.link_username,
-            "link_type": extracted.link_type,
+            "permalink": permalink,
+            "is_dm_share": bool(share),
+            "share_type": (share or {}).get("type"),
             "confidence": extracted.confidence,
             "session_id": session_id,
         },
     )
 
-    # NOTE: This is a stub implementation - Instagram link processing not yet implemented
-    # Future implementation will:
-    # 1. Fetch Instagram content via API or scraping
-    # 2. Extract caption text
-    # 3. Extract location tags
-    # 4. Extract place mentions from caption
-    # 5. Process comments for additional context
-    # 6. Queue place extraction jobs
+    settings = get_settings()
+    instagram_settings = settings.instagram
+    facebook_settings = settings.facebook
 
-    logger.warning(
-        "Instagram link handler not yet implemented",
-        extra={"url": extracted.url, "content_type": extracted.link_type},
+    app_id = facebook_settings.app_id if facebook_settings else None
+    app_secret = (
+        facebook_settings.app_secret
+        if facebook_settings
+        else (instagram_settings.app_secret if instagram_settings else None)
     )
+    access_token = instagram_settings.access_token if instagram_settings else None
+    ig_user_id = instagram_settings.account_id if instagram_settings else None
+
+    if not (access_token or (app_id and app_secret)):
+        logger.warning(
+            "Instagram Graph credentials missing; cannot fetch post metadata"
+        )
+        return HandlerResult(
+            success=False,
+            handler_name="handle_instagram_link",
+            content_type=ContentType.INSTAGRAM_LINK,
+            data={"url": extracted.url, "status": "not_configured"},
+            error="Instagram Graph credentials not configured",
+            error_code="INSTAGRAM_GRAPH_NOT_CONFIGURED",
+            message=(
+                "I received an Instagram link, but I'm not configured to fetch "
+                "Instagram metadata. Please set INSTAGRAM_ACCESS_TOKEN or "
+                "FACEBOOK_APP_ID/FACEBOOK_APP_SECRET."
+            ),
+        )
+
+    if not permalink:
+        logger.info(
+            "No canonical Instagram permalink could be resolved",
+            extra={"url": extracted.url, "share_type": (share or {}).get("type")},
+        )
+        return HandlerResult(
+            success=True,
+            handler_name="handle_instagram_link",
+            content_type=ContentType.INSTAGRAM_LINK,
+            data={
+                "url": extracted.url,
+                "share": share,
+                "status": "no_permalink",
+            },
+            message=(
+                "I couldn't extract a public Instagram permalink from this "
+                "share. If it was a story or a private post, I can't fetch it."
+            ),
+        )
+
+    async with InstagramGraphService(
+        app_id=app_id,
+        app_secret=app_secret,
+        access_token=access_token,
+        ig_user_id=ig_user_id,
+    ) as service:
+        try:
+            post_info = await service.fetch_post_info(permalink)
+        except Exception as exc:
+            logger.error(
+                "Failed to fetch Instagram post metadata",
+                extra={"permalink": permalink, "error": str(exc)},
+            )
+            return HandlerResult(
+                success=False,
+                handler_name="handle_instagram_link",
+                content_type=ContentType.INSTAGRAM_LINK,
+                data={"url": extracted.url, "permalink": permalink, "status": "error"},
+                error=str(exc),
+                error_code="INSTAGRAM_GRAPH_ERROR",
+                message=(
+                    "I couldn't fetch this Instagram post. It may be private, "
+                    "removed, or not yet propagated. Try again in a moment."
+                ),
+            )
+
+    if not post_info:
+        return HandlerResult(
+            success=True,
+            handler_name="handle_instagram_link",
+            content_type=ContentType.INSTAGRAM_LINK,
+            data={"url": extracted.url, "permalink": permalink, "status": "no_data"},
+            message=(
+                "Instagram didn't return any public info for this link. It may "
+                "be a private or restricted post."
+            ),
+        )
+
+    summary = await _summarize_instagram_post(post_info, settings)
+
+    if summary:
+        message = (
+            f"📸 Instagram {post_info.media_type or 'post'} by "
+            f"@{post_info.author_name or 'unknown'}\n\n"
+            f"{summary}\n\n"
+            f"🔗 {post_info.permalink}"
+        )
+    else:
+        caption_preview = (post_info.title or "").strip()
+        if len(caption_preview) > 400:
+            caption_preview = caption_preview[:400].rstrip() + "..."
+        message = (
+            f"📸 Instagram {post_info.media_type or 'post'} by "
+            f"@{post_info.author_name or 'unknown'}\n\n"
+            f"{caption_preview or '(no caption available)'}\n\n"
+            f"🔗 {post_info.permalink}"
+        )
 
     return HandlerResult(
-        success=False,
+        success=True,
         handler_name="handle_instagram_link",
         content_type=ContentType.INSTAGRAM_LINK,
         data={
             "url": extracted.url,
-            "content_id": extracted.link_content_id,
-            "ig_username": extracted.link_username,
-            "link_type": extracted.link_type,
-            "status": "not_implemented",
+            "permalink": post_info.permalink,
+            "shortcode": post_info.shortcode,
+            "author_name": post_info.author_name,
+            "media_type": post_info.media_type,
+            "share": share,
+            "status": "summarized",
+            "summary_via_llm": bool(summary),
         },
-        error="Instagram link processing not yet implemented",
-        error_code="NOT_IMPLEMENTED",
-        message=f"Instagram {extracted.link_type or 'content'} link received. This feature is coming soon!",
-        follow_up_actions=[
-            "fetch_instagram_content",
-            "extract_location_tags",
-            "extract_places_from_caption",
-        ],
+        message=message,
+        follow_up_actions=["extract_places_from_caption"],
     )
 
 

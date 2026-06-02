@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(.venv/bin/python -c ' *)",
+      "Bash(.venv/bin/python /tmp/test_chain.py)",
+      "Bash(gh repo *)"
+    ]
+  }
+}

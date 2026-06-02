@@ -518,10 +518,11 @@ class InstagramAdapter(MessagingAdapter):
 
         media_urls = []
         media_type = None
+        shared_attachment: Optional[Dict[str, Any]] = None
         attachments = message.get("attachments", [])
         for att in attachments:
             att_type = att.get("type")
-            payload = att.get("payload", {})
+            payload = att.get("payload", {}) or {}
             if att_type == "image":
                 media_type = "image"
                 media_urls.append(payload.get("url", ""))
@@ -534,9 +535,26 @@ class InstagramAdapter(MessagingAdapter):
             elif att_type == "file":
                 media_type = "file"
                 media_urls.append(payload.get("url", ""))
+            elif att_type in ("ig_reel", "share", "story_mention", "story_reply") and shared_attachment is None:
+                shared_attachment = {
+                    "type": att_type,
+                    "url": payload.get("url"),
+                    "title": payload.get("title"),
+                    "reel_video_url": payload.get("reel_video_url"),
+                    "story_id": payload.get("id"),
+                }
+
+        metadata: Dict[str, Any] = {}
+        if shared_attachment:
+            metadata["instagram_share"] = shared_attachment
+            # Surface the share URL as text so the orchestrator classifies this
+            # message as an Instagram link and routes it to handle_instagram_link.
+            share_url = shared_attachment.get("url")
+            if share_url and not text:
+                text = share_url
 
         # Ignore message events that have no user content.
-        if not text and not media_urls:
+        if not text and not media_urls and not shared_attachment:
             return None
 
         timestamp = self._parse_timestamp(msg_event.get("timestamp"))
@@ -551,6 +569,7 @@ class InstagramAdapter(MessagingAdapter):
             media_urls=media_urls,
             media_type=media_type,
             raw_payload=raw_payload,
+            metadata=metadata,
         )
 
     def _parse_postback_event(
